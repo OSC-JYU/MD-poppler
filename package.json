@@ -1,0 +1,21 @@
+{
+  "name": "md-poppler",
+  "version": "1.0.0",
+  "description": "MessyDesk wrapper for node-poppler",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Ari Häyrinen",
+  "license": "ISC",
+  "dependencies": {
+    "@koa/multer": "^3.0.2",
+    "fs-extra": "^11.1.1",
+    "koa": "^2.14.2",
+    "koa-body": "^6.0.1",
+    "koa-json": "^2.0.2",
+    "koa-router": "^12.0.0",
+    "node-poppler": "^6.2.3",
+    "uuid": "^9.0.0"
+  }
+}
