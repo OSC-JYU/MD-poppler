@@ -55,6 +55,8 @@ router.post('/process', upload.fields([
     
         if(requestJSON.params.task == 'pdf2text') {
             output.response.uri = await PDFToText(contentFilepath, requestJSON.params.options, dirname)
+        } else if(requestJSON.params.task == 'pdf2images') {
+            output.response.uri = await PDFToImages(contentFilepath, requestJSON.params.options, dirname)
         }
 
         await fs.unlink(contentFilepath)
@@ -109,39 +111,51 @@ async function PDFToText(filepath, options, dirname) {
     return `/files/${dirname}/text.txt`
 }
 
+async function PDFToImages(filepath, options, dirname) {
+    if(!options) {
+        options = {}
+    }
+    options.pngFile = true
+    if(!options.cropBox) options.cropBox = true
+    //options.resolutionXYAxis = parseInt(params.resolution)
 
-// async function uploadFile(uploadFilePath) {
+    var filename = filepath.split('/').pop()
+    const poppler = new Poppler('/usr/bin/');
 
-// 	try {
-//         const filename = uuidv4()
-//         const filepath = path.join('data', filename) 
-//         console.log(filepath)
-	
-// 		var exists = await checkFileExists(filepath)
-// 		if(!exists) {
-// 			await fs.rename(uploadFilePath, filepath);
-// 			console.log('File moved successfully!')
-// 		} else {
-// 			await fs.unlink(uploadFilePath)
-// 			throw('file exists!')
-// 		}
-
-// 		return filepath
-
-// 	} catch (e) {
-// 		console.log('File upload failed')
-// 		console.log(e.message)
-// 	}
-// }
+    console.log(filename)
+    await poppler.pdfToPpm(filepath, `data/${dirname}/page`, options);
+    var images = getImageList(`data/${dirname}`,`files/${dirname}`)
+    return images
 
 
-// async function checkFileExists(filePath) {
-// 	try {
-// 		console.log(filePath)
-// 	  	await fs.access(filePath);
-// 	  	return true;
-// 	} catch (err) {
-// 		return false;
-// 	}
-// }
+//     if(!params.resolution || !parseInt(params.resolution)) throw('Invalid render resolution (must be integer)')
+//     const {filename, input_path, output_path} = await this.getPaths(params, 'rendered/' + params.resolution)
+//     if(await this.exists(output_path)) throw(`Output directory exists (${output_path})`)
 
+//     options.resolutionXYAxis = parseInt(params.resolution)
+//     if(query.format && ['jpg', 'jpeg'].includes(query.format)) options.jpegFile = true
+
+
+//     //const filepath = path.join(input_path, filename)
+//     if(!await this.exists(filepath)) throw('PDF file not found: ' + filepath)
+//     await fsp.mkdir(output_path, { recursive: true })
+//     console.log(output_path)
+
+//     const poppler = new Poppler('/usr/bin/');
+//     await poppler.pdfToPpm(filepath, output_path + '/page', options);
+//     var files = await this.getImageList(output_path, '')
+//     var response = {files: files}
+//     return response
+ }
+
+
+async function getImageList(input_path, fullpath, filter) {
+    console.log(input_path)
+    if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
+    var files = await fs.readdir(input_path, { withFileTypes: true })
+    return files
+        .filter(dirent => dirent.isFile())
+        .map(dirent => dirent.name)
+        .filter(f => filter.includes(path.extname(f).toLowerCase()))
+        .map(x => path.join(fullpath, x))
+}
