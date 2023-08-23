@@ -48,17 +48,20 @@ router.post('/process', upload.fields([
 
     try {
         var dirname = uuidv4()
+
         await fs.mkdir(path.join('data', dirname))
         var request = await fs.readFile(requestFilepath)
         var requestJSON = JSON.parse(request)
         console.log(requestJSON)
+        const task = requestJSON.params.task
+        delete requestJSON.params.task
     
-        if(requestJSON.params.task == 'pdf2text') {
-            output.response.uri = await PDFToText(contentFilepath, requestJSON.params.options, dirname)
-        } else if(requestJSON.params.task == 'pdf2images') {
-            output.response.uri = await PDFToImages(contentFilepath, requestJSON.params.options, dirname)
-        } else if(requestJSON.params.task == 'pdfimages') {
-            output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params.options, dirname)
+        if(task == 'pdf2text') {
+            output.response.uri = await PDFToText(contentFilepath, requestJSON.params, dirname)
+        } else if(task == 'pdf2images') {
+            output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname)
+        } else if(task == 'pdfimages') {
+            output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname)
         }
 
         await fs.unlink(contentFilepath)
@@ -106,6 +109,7 @@ async function PDFToText(filepath, options, dirname) {
     if(!options) {
         options = {}
     }
+    cleanPageOptions(options)
 
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfToText(filepath, `data/${dirname}/text.txt`, options);
@@ -120,6 +124,7 @@ async function PDFToImages(filepath, options, dirname) {
     }
     options.pngFile = true
     if(!options.cropBox) options.cropBox = true
+    cleanPageOptions(options)
     //options.resolutionXYAxis = parseInt(params.resolution)
 
     const poppler = new Poppler('/usr/bin/');
@@ -137,6 +142,7 @@ async function PDFToImages(filepath, options, dirname) {
     }
     options.pngFile = true
     options.allFiles = true
+    cleanPageOptions(options)
 
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfImages(filepath, `data/${dirname}/page`, options)
@@ -155,4 +161,13 @@ async function getImageList(input_path, fullpath, filter) {
         .map(dirent => dirent.name)
         .filter(f => filter.includes(path.extname(f).toLowerCase()))
         .map(x => path.join(fullpath, x))
+}
+
+function cleanPageOptions(options) {
+    if(options.firstPageToConvert ) {
+        options.firstPageToConvert = parseInt(options.firstPageToConvert, 10)
+    }
+    if(options.lastPageToConvert ) {
+        options.lastPageToConvert = parseInt(options.lastPageToConvert, 10)
+    }
 }
