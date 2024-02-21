@@ -1,0 +1,8 @@
+{
+    "type": "pdf",
+    "params": {
+        "task": "pdfsplit",
+        "firstPageToExtract":2,
+        "lastPageToExtract":3
+    }
+}

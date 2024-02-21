@@ -1,0 +1,8 @@
+{
+    "type": "pdf",
+    "params": {
+        "task": "pdfseparate",
+        "firstPageToExtract":1,
+        "lastPageToExtract":1
+    }
+}

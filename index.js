@@ -62,6 +62,10 @@ router.post('/process', upload.fields([
             output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname)
         } else if(task == 'pdfimages') {
             output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname)
+        } else if(task == 'pdfseparate') {
+            output.response.uri = await PDFSeparate(contentFilepath, requestJSON.params, dirname)
+        } else if(task == 'pdfsplit') {
+            output.response.uri = await PDFSplit(contentFilepath, requestJSON.params, dirname)
         }
 
         await fs.unlink(contentFilepath)
@@ -103,6 +107,37 @@ var server = app.listen(set_port, function () {
 // ******* ROUTES ENDS ************
 
 
+async function PDFSplit(filepath, options, dirname) {
+    if(!options) {
+        options = {}
+    }
+    cleanPageOptions(options)
+
+    const poppler = new Poppler('/usr/bin/');
+    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
+    input_dir = `data/${dirname}`
+    var files = await fs.readdir(input_dir)
+    files = files.map(x => path.join(input_dir, x))
+    console.log(files)
+    options = {}
+    await poppler.pdfUnite(files, `data/${dirname}/pages.pdf`, options);
+
+    return `/files/${dirname}/pages.pdf`
+}
+
+
+async function PDFSeparate(filepath, options, dirname) {
+    if(!options) {
+        options = {}
+    }
+    cleanPageOptions(options)
+
+    const poppler = new Poppler('/usr/bin/');
+    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
+    var files = getFileList(`data/${dirname}`,`/files/${dirname}`, ['.pdf'])
+
+    return files
+}
 
 
 async function PDFToText(filepath, options, dirname) {
@@ -145,7 +180,7 @@ async function PDFToImages(filepath, options, dirname) {
     cleanPageOptions(options)
 
     const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfImages(filepath, `data/${dirname}/page`, options)
+    await poppler.pdfImages(filepath, `data/${dirname}/image`, options)
     var images = await getImageList(`data/${dirname}`,`/files/${dirname}`)
     console.log(images)
     return images
@@ -163,11 +198,28 @@ async function getImageList(input_path, fullpath, filter) {
         .map(x => path.join(fullpath, x))
 }
 
+async function getFileList(input_path, fullpath, filter) {
+    console.log(input_path)
+    if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
+    var files = await fs.readdir(input_path, { withFileTypes: true })
+    return files
+        .filter(dirent => dirent.isFile())
+        .map(dirent => dirent.name)
+        .filter(f => filter.includes(path.extname(f).toLowerCase()))
+        .map(x => path.join(fullpath, x))
+}
+
 function cleanPageOptions(options) {
     if(options.firstPageToConvert ) {
         options.firstPageToConvert = parseInt(options.firstPageToConvert, 10)
     }
     if(options.lastPageToConvert ) {
         options.lastPageToConvert = parseInt(options.lastPageToConvert, 10)
+    }
+    if(options.firstPageToExtract ) {
+        options.firstPageToExtract = parseInt(options.firstPageToExtract, 10)
+    }
+    if(options.lastPageToExtract ) {
+        options.lastPageToExtract = parseInt(options.lastPageToExtract, 10)
     }
 }
