@@ -50,7 +50,7 @@ router.post('/process', upload.fields([
         var dirname = uuidv4()
 
         await fs.mkdir(path.join('data', dirname))
-        var request = await fs.readFile(requestFilepath)
+        var request = await fs.readJSON(requestFilepath)
         var requestJSON = JSON.parse(request)
         console.log(requestJSON)
         const task = requestJSON.params.task

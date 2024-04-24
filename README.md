@@ -55,45 +55,6 @@ Split: extract range on pages and get ONE pdf
 
 ## MessyDesk
 
-### Registering service
-
-Register with service.json (this might change)
-
-	{
-		"url": "http://localhost:8300",
-		"id": "md-poppler",
-		"type": "pdf",
-		"api_type": "elg",
-		"api": "/process",
-		"name" :"Poppler",
-		
-		"supported_types": ["pdf"],
-		"supported_formats": ["pdf"],
-
-		"description": "Poppler is a PDF rendering library that also includes a collection of utility binaries, which allows for the manipulation and extraction of data from PDF documents such as converting PDF files to HTML, TXT, or PostScript",
-
-		"tasks": {
-			"pdf2text": {
-				"params": {"task": "pdf2text"},
-				"output": "store",
-				"name": "Extract text from PDF",
-				"description": "Creates a txt file from PDF."
-			},
-			"pdf2images": {
-				"params": {"task": "pdf2images"},
-				"output": "store",
-				"name": "Render PDF as images",
-				"description": "Renders pages as image files in any resolution."           
-			},
-			"pdfimages": {
-				"params": {"task": "pdfimages"},
-				"output": "store",
-				"name": "Extract images from PDF (png)",
-				"description": "Extract images from PDF as png files."           
-			}
-		}
-
-	}
 
 
 ### calling service
