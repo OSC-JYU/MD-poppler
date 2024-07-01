@@ -2,7 +2,7 @@
     "type": "pdf",
     "params": {
         "task": "pdfseparate",
-        "firstPageToExtract":1,
-        "lastPageToExtract":1
+        "firstPageToExtract":"1",
+        "lastPageToExtract":"1"
     }
 }

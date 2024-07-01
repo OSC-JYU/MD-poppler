@@ -22,9 +22,6 @@ const upload = multer({
 	fileSize: 1048576
 });
 
-var filepath = 'test/sample.pdf'
-
-
 
 
 // ******* ROUTES ************
@@ -50,9 +47,9 @@ router.post('/process', upload.fields([
         var dirname = uuidv4()
 
         await fs.mkdir(path.join('data', dirname))
-        var request = await fs.readJSON(requestFilepath)
-        var requestJSON = JSON.parse(request)
-        console.log(requestJSON)
+        var requestJSON = await fs.readJSON(requestFilepath)
+        if(typeof request === 'string')
+            requestJSON = JSON.parse(requestJSON)
         const task = requestJSON.params.task
         delete requestJSON.params.task
     
