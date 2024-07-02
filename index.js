@@ -47,8 +47,8 @@ router.post('/process', upload.fields([
         var dirname = uuidv4()
 
         await fs.mkdir(path.join('data', dirname))
-        var requestJSON = await fs.readJSON(requestFilepath)
-        if(typeof request === 'string')
+        var requestJSON = await fs.readJSON(requestFilepath, 'utf-8')
+        if(typeof requestJSON === 'string')
             requestJSON = JSON.parse(requestJSON)
         const task = requestJSON.params.task
         delete requestJSON.params.task
