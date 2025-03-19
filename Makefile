@@ -2,7 +2,7 @@ IMAGES := $(shell docker images -f "dangling=true" -q)
 CONTAINERS := $(shell docker ps -a -q -f status=exited)
 VOLUME := md-poppler-data
 VERSION := 0.1
-REPOSITORY := osc.jyu.fi
+REPOSITORY := osc.repo.kopla.jyu.fi
 IMAGE := md-poppler
 
 
@@ -16,7 +16,7 @@ build:
 start:
 	docker run -d --name $(IMAGE) \
 		-v $(VOLUME):/logs \
-		-p 8300:8400 \
+		-p 8300:8300 \
 		--restart unless-stopped \
 		$(REPOSITORY)/messydesk/$(IMAGE):$(VERSION)
 

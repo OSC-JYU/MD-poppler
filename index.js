@@ -1,108 +1,222 @@
-const Koa			= require('koa');
-const Router		= require('koa-router');
-const { koaBody }	= require('koa-body');
-const json			= require('koa-json')
-const multer 		= require('@koa/multer');
-//const winston 		= require('winston');
-const path 			= require('path')
-const fs 			= require('fs-extra')
+const Hapi = require('@hapi/hapi');
+const Inert = require('@hapi/inert');
+const fs = require('fs-extra');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { Poppler } = require('node-poppler');
+
+const init = async () => {
+    const server = Hapi.server({
+        port: process.env.PORT || 8300,
+        host: '0.0.0.0',
+        routes: {
+             json: {
+                space: 2 // Indents JSON output for readability
+             }
+        }
+    });
+
+    await server.register(Inert);
+
+    server.route({
+        method: 'GET',
+        path: '/',
+        handler: (request, h) => {
+            return 'md-poppler API';
+        }
+    });
+
+    server.route({
+        method: 'POST',
+        path: '/upload/{split?}',
+        options: {
+            payload: {
+                output: 'stream',
+                parse: true,
+                allow: 'multipart/form-data',
+                multipart: true,
+                maxBytes: 1048576000 // 1 Gt
+            }
+        },
+        handler: async (request, reply) => {
+            try {
+                const data = request.payload;
+                const file = data.file;
+                const dirname = uuidv4();
+                await fs.mkdir(path.join('data', dirname));
+                const target = path.join('data', dirname, '_original.pdf');
+                const writeStream = fs.createWriteStream(target);
+                
+                await new Promise((resolve, reject) => {
+                    file.on('error', reject);
+                    writeStream.on('finish', resolve);
+                    file.pipe(writeStream);
+                });
+                
+                var info = await PDFInfoRaw(target, {});
+
+                if (request.params.split) {
+                    const splitPath = path.join(dirname, 'pages');
+                    await fs.mkdir(path.join('data', splitPath));
+                    await PDFSeparate(target, {}, splitPath);
+                }
+
+                return reply.response({ upload: dirname, info }).code(200);
+            } catch (e) {
+                console.log(e);
+                return h.response({ error: e.message }).code(500);
+            }
+        }
+    });
 
 
-const { Poppler }       = require("node-poppler");
+    server.route({
+        method: 'POST',
+        path: '/process',
+        options: {
+            payload: {
+                output: 'stream',
+                parse: true,
+                allow: 'multipart/form-data',
+                multipart: true,
+                maxBytes: 1048576
+            }
+        },
+        handler: async (request, h) => {
+            let output = { response: { type: 'stored', uri: [] } };
+            let contentFilepath = '';
+            try {
+                const data = request.payload;
+                const requestFile = data.request;
+                const contentFile = data.content;
+                
+                const requestFilePath = path.join('uploads', uuidv4() + '.json');
+                const writeStream = fs.createWriteStream(requestFilePath);
+                
+                await new Promise((resolve, reject) => {
+                    requestFile.on('error', reject);
+                    writeStream.on('finish', resolve);
+                    requestFile.pipe(writeStream);
+                });
+                
+                let requestJSON = await fs.readJSON(requestFilePath, 'utf-8');
+                console.log(requestJSON)
+                await fs.unlink(requestFilePath);
+                if (typeof requestJSON === 'string') {
+                    requestJSON = JSON.parse(requestJSON);
+                }
+                const task = requestJSON.params.task;
+                delete requestJSON.params.task;
+                const dirname = path.join(requestJSON.preloaded || uuidv4());
 
-var app				= new Koa();
-var router			= new Router();
+                if (requestJSON.preloaded) {
+                    contentFilepath = path.join('data', requestJSON.preloaded, '_original.pdf');
+                } else {
+                    const contentTarget = path.join('uploads', uuidv4() + '.pdf');
+                    const contentStream = fs.createWriteStream(contentTarget);
+                    await new Promise((resolve, reject) => {
+                        contentFile.on('error', reject);
+                        contentStream.on('finish', resolve);
+                        contentFile.pipe(contentStream);
+                    });
+                    contentFilepath = contentTarget;
+                }
 
-app.use(json({ pretty: true, param: 'pretty' }))
-app.use(koaBody());
+                switch (task) {
+                    case 'delete':
+                        await fs.remove(path.join('data', requestJSON.preloaded));
+                        break;
+                    case 'pdf2text':
+                        output.response.uri = await PDFToText(contentFilepath, requestJSON.params, dirname);
+                        break;
+                    case 'pdf2images':
+                        output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname);
+                        break;
+                    case 'pdfimages':
+                        output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname);
+                        break;
+                    case 'pdfseparate':
+                        output.response.uri = await PDFSeparate(contentFilepath, requestJSON.params, dirname);
+                        break;
+                    case 'pdfsplit':
+                        output.response.uri = await PDFSplit(contentFilepath, requestJSON.params, dirname);
+                        break;
+                    case 'pdfinfo':
+                        output.response.uri = await PDFInfo(contentFilepath, requestJSON.params, dirname);
+                        break;
+                }
 
-const upload = multer({
-	dest: './uploads/',
-	fileSize: 1048576
+                if (!requestJSON.preloaded) {
+                    await fs.unlink(contentFilepath);
+                }
+            } catch (e) {
+                console.error(e.message);
+                try {
+                    if (contentFilepath) await fs.unlink(contentFilepath);
+                } catch (err) {
+                    console.error('Error removing temp files:', err);
+                }
+                return h.response({ error: e.message }).code(500);
+            }
+            return h.response(output).code(200);
+        }
+    });
+
+
+    // route for downloading output files
+    server.route({
+        method: 'GET',
+        path: '/files/{dir}/{file}',
+        handler: async (request, h) => {
+            const dirPath = path.join('data', request.params.dir);
+            const filePath = path.join(dirPath, request.params.file);
+    
+            try {
+                await fs.access(filePath);
+    
+                const response = h.file(filePath)
+                    .header('Content-Disposition', `attachment; filename=${request.params.file}`);
+    
+                response.events.on('finish', async () => {
+                    try {
+                        await fs.unlink(filePath);
+                        console.log(`Deleted file: ${filePath}`);
+                    } catch (err) {
+                        console.error(`Error deleting file: ${err.message}`);
+                    }
+                });
+    
+                return response;
+            } catch (err) {
+                return h.response('File not found').code(404);
+            }
+        }
+    });
+    
+
+    await server.start();
+    console.log(`Server running on ${server.info.uri}`);
+};
+
+init().catch(err => {
+    console.error(err);
+    process.exit(1);
 });
 
 
 
-// ******* ROUTES ************
 
-router.get('/', function (ctx) {
-	ctx.body = 'md-poppler API'
-})
+async function PDFInfoRaw(filepath, options) {
+    options = { printAsJson: true };
+    const poppler = new Poppler('/usr/bin/');
+    return await poppler.pdfInfo(filepath, options);
+}
 
-router.post('/process', upload.fields([
-    { name: 'request', maxCount: 1 },
-    { name: 'content', maxCount: 1 }
-  ]), async function (ctx) {
-
-    let output = {response: {
-        type: "stored",
-        uri: []
-    }}
-    console.log(ctx.request.files)
-    const requestFilepath = ctx.request.files['request'][0].path
-    const contentFilepath = ctx.request.files['content'][0].path
-
-    try {
-        var dirname = uuidv4()
-
-        await fs.mkdir(path.join('data', dirname))
-        var requestJSON = await fs.readJSON(requestFilepath, 'utf-8')
-        if(typeof requestJSON === 'string')
-            requestJSON = JSON.parse(requestJSON)
-        const task = requestJSON.params.task
-        delete requestJSON.params.task
-    
-        if(task == 'pdf2text') {
-            output.response.uri = await PDFToText(contentFilepath, requestJSON.params, dirname)
-        } else if(task == 'pdf2images') {
-            output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname)
-        } else if(task == 'pdfimages') {
-            output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname)
-        } else if(task == 'pdfseparate') {
-            output.response.uri = await PDFSeparate(contentFilepath, requestJSON.params, dirname)
-        } else if(task == 'pdfsplit') {
-            output.response.uri = await PDFSplit(contentFilepath, requestJSON.params, dirname)
-        }
-
-        await fs.unlink(contentFilepath)
-        await fs.unlink(requestFilepath)
-    } catch (e) {
-        console.log(e.message)
-        try {
-            await fs.unlink(contentFilepath)
-            await fs.unlink(requestFilepath)
-        } catch(e) {
-            console.log('Removing of temp files failed')
-        }
-
-    }
-	ctx.body = output
-})
-
-
-router.get('/files/:dir/:file', async function (ctx) {
-    var input_path = path.join('data', ctx.request.params.dir, ctx.request.params.file)
-    const src = fs.createReadStream(input_path);
-    ctx.set('Content-Disposition', `attachment; filename=${ctx.request.params.file}`);
-    ctx.type = 'application/octet-stream';
-    ctx.body = src
-})
-
-
-app.use(router.routes());
-
-var set_port = process.env.PORT || 8300
-var server = app.listen(set_port, function () {
-   var host = server.address().address
-   var port = server.address().port
-
-   console.log('md-poppler running at http://%s:%s', host, port)
-})
-
-
-// ******* ROUTES ENDS ************
-
+async function PDFSeparate(filepath, options, dirname) {
+    if (!options) options = {};
+    const poppler = new Poppler('/usr/bin/');
+    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
+}
 
 async function PDFSplit(filepath, options, dirname) {
     if(!options) {
@@ -115,7 +229,7 @@ async function PDFSplit(filepath, options, dirname) {
     input_dir = `data/${dirname}`
     var files = await fs.readdir(input_dir)
     files = files.map(x => path.join(input_dir, x))
-    console.log(files)
+
     options = {}
     await poppler.pdfUnite(files, `data/${dirname}/pages.pdf`, options);
 
@@ -162,7 +276,6 @@ async function PDFToImages(filepath, options, dirname) {
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfToPpm(filepath, `data/${dirname}/page`, options);
     var images = getImageList(`data/${dirname}`,`/files/${dirname}`)
-    console.log(images)
     return images
 
  }
@@ -173,19 +286,31 @@ async function PDFToImages(filepath, options, dirname) {
         options = {}
     }
     options.pngFile = true
-    options.allFiles = true
+    //options.allFiles = true
     cleanPageOptions(options)
 
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfImages(filepath, `data/${dirname}/image`, options)
     var images = await getImageList(`data/${dirname}`,`/files/${dirname}`)
-    console.log(images)
     return images
  }
 
+ async function PDFInfo(filepath, options, dirname) {   
+    options = {printAsJson: true}
+    const poppler = new Poppler('/usr/bin/');
+    var r = await poppler.pdfInfo(filepath,  options);
+    await fs.writeFile(`data/${dirname}/info.json`, JSON.stringify(r))
+    return `/files/${dirname}/info.json`
+}
+
+async function PDFInfoRaw(filepath, options) {   
+    options = {printAsJson: true}
+    const poppler = new Poppler('/usr/bin/');
+    var r = await poppler.pdfInfo(filepath,  options);
+    return r
+}
 
 async function getImageList(input_path, fullpath, filter) {
-    console.log(input_path)
     if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
     var files = await fs.readdir(input_path, { withFileTypes: true })
     return files
@@ -196,7 +321,6 @@ async function getImageList(input_path, fullpath, filter) {
 }
 
 async function getFileList(input_path, fullpath, filter) {
-    console.log(input_path)
     if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
     var files = await fs.readdir(input_path, { withFileTypes: true })
     return files
