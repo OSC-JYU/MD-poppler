@@ -1,0 +1,9 @@
+{
+    "type": "image",
+    "preloaded": "fb7d5c11-eb40-4f28-a31e-be748322f253",
+    "params": {
+        "task": "pdf2images",
+        "firstPageToConvert": 1,
+        "lastPageToConvert": 3
+    }
+}

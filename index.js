@@ -64,7 +64,7 @@ const init = async () => {
                 return reply.response({ upload: dirname, info }).code(200);
             } catch (e) {
                 console.log(e);
-                return h.response({ error: e.message }).code(500);
+                return reply.response({ error: e.message }).code(500);
             }
         }
     });
@@ -100,7 +100,7 @@ const init = async () => {
                 });
                 
                 let requestJSON = await fs.readJSON(requestFilePath, 'utf-8');
-                console.log(requestJSON)
+                //console.log(requestJSON)
                 await fs.unlink(requestFilePath);
                 if (typeof requestJSON === 'string') {
                     requestJSON = JSON.parse(requestJSON);
@@ -250,17 +250,36 @@ async function PDFSeparate(filepath, options, dirname) {
     return files
 }
 
-
+// api-poppler calls this normally so that first and last pages are the same (not zero)
 async function PDFToText(filepath, options, dirname) {
     if(!options) {
         options = {}
     }
     cleanPageOptions(options)
 
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfToText(filepath, `data/${dirname}/text.txt`, options);
+    if(options.firstPageToConvert == null || options.lastPageToConvert == null) {
+        throw new Error('firstPageToConvert and lastPageToConvert are required')
+    }
 
-    return `/files/${dirname}/text.txt`
+    var text_file = `text.txt`
+    if(options.firstPageToConvert ===  options.lastPageToConvert){
+        text_file = `page_${options.firstPageToConvert}.txt`
+    } else {
+        text_file = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`
+    } 
+
+    // get all text from pdf
+
+
+    const poppler = new Poppler('/usr/bin/');
+    await poppler.pdfToText(filepath, `data/${dirname}/${text_file}`, options);
+
+    if(options.firstPageToConvert === 0 && options.lastPageToConvert === 0) {
+        return `/files/${dirname}/${text_file}`
+    } else if(options.firstPageToConvert ===  options.lastPageToConvert){
+        return [`/files/${dirname}/${text_file}`]
+    }   
+    
 }
 
 
@@ -289,8 +308,12 @@ async function PDFToImages(filepath, options, dirname) {
     //options.allFiles = true
     cleanPageOptions(options)
 
+    if(options.firstPageToConvert == null || options.lastPageToConvert == null) {
+        throw new Error('firstPageToConvert and lastPageToConvert are required')
+    }
+
     const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfImages(filepath, `data/${dirname}/image`, options)
+    await poppler.pdfImages(filepath, `data/${dirname}/page-${options.firstPageToConvert}_image`, options)
     var images = await getImageList(`data/${dirname}`,`/files/${dirname}`)
     return images
  }
@@ -332,15 +355,24 @@ async function getFileList(input_path, fullpath, filter) {
 
 function cleanPageOptions(options) {
     if(options.firstPageToConvert ) {
-        options.firstPageToConvert = parseInt(options.firstPageToConvert, 10)
+        options.firstPageToConvert = parseInt(options.firstPageToConvert, 10) || 0
     }
     if(options.lastPageToConvert ) {
-        options.lastPageToConvert = parseInt(options.lastPageToConvert, 10)
+        options.lastPageToConvert = parseInt(options.lastPageToConvert, 10) || 0
     }
     if(options.firstPageToExtract ) {
-        options.firstPageToExtract = parseInt(options.firstPageToExtract, 10)
+        options.firstPageToExtract = parseInt(options.firstPageToExtract, 10) || 0
     }
     if(options.lastPageToExtract ) {
-        options.lastPageToExtract = parseInt(options.lastPageToExtract, 10)
+        options.lastPageToExtract = parseInt(options.lastPageToExtract, 10) || 0
+    }
+    if(options.resolutionXAxis ) {
+        options.resolutionXAxis = parseInt(options.resolutionXAxis, 10) || 150
+    }
+    if(options.resolutionYAxis ) {
+        options.resolutionYAxis = parseInt(options.resolutionYAxis, 10)|| 150
+    }
+    if(options.resolutionXYAxis ) {
+        options.resolutionXYAxis = parseInt(options.resolutionXYAxis, 10)|| 150
     }
 }
