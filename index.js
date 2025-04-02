@@ -263,7 +263,7 @@ async function PDFToText(filepath, options, dirname) {
 
     var text_file = `text.txt`
     if(options.firstPageToConvert ===  options.lastPageToConvert){
-        text_file = `page_${options.firstPageToConvert}.txt`
+        text_file = `page_${String(options.firstPageToConvert).padStart(3, '0')}.txt`;
     } else {
         text_file = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`
     } 
