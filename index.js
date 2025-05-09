@@ -26,49 +26,6 @@ const init = async () => {
         }
     });
 
-    server.route({
-        method: 'POST',
-        path: '/upload/{split?}',
-        options: {
-            payload: {
-                output: 'stream',
-                parse: true,
-                allow: 'multipart/form-data',
-                multipart: true,
-                maxBytes: 1048576000 // 1 Gt
-            }
-        },
-        handler: async (request, reply) => {
-            try {
-                const data = request.payload;
-                const file = data.file;
-                const dirname = uuidv4();
-                await fs.mkdir(path.join('data', dirname));
-                const target = path.join('data', dirname, '_original.pdf');
-                const writeStream = fs.createWriteStream(target);
-                
-                await new Promise((resolve, reject) => {
-                    file.on('error', reject);
-                    writeStream.on('finish', resolve);
-                    file.pipe(writeStream);
-                });
-                
-                var info = await PDFInfoRaw(target, {});
-
-                if (request.params.split) {
-                    const splitPath = path.join(dirname, 'pages');
-                    await fs.mkdir(path.join('data', splitPath));
-                    await PDFSeparate(target, {}, splitPath);
-                }
-
-                return reply.response({ upload: dirname, info }).code(200);
-            } catch (e) {
-                console.log(e);
-                return reply.response({ error: e.message }).code(500);
-            }
-        }
-    });
-
 
     server.route({
         method: 'POST',
@@ -79,7 +36,7 @@ const init = async () => {
                 parse: true,
                 allow: 'multipart/form-data',
                 multipart: true,
-                maxBytes: 1048576
+                maxBytes: 500 * 1024 * 1024,
             }
         },
         handler: async (request, h) => {
@@ -100,57 +57,48 @@ const init = async () => {
                 });
                 
                 let requestJSON = await fs.readJSON(requestFilePath, 'utf-8');
-                //console.log(requestJSON)
+                console.log(requestJSON)
                 await fs.unlink(requestFilePath);
                 if (typeof requestJSON === 'string') {
                     requestJSON = JSON.parse(requestJSON);
                 }
                 const task = requestJSON.params.task;
                 delete requestJSON.params.task;
-                const dirname = path.join(requestJSON.preloaded || uuidv4());
+                const dirname = uuidv4();
+                await fs.mkdir(path.join('data', dirname));
+                console.log('dirname', dirname)
 
-                if (requestJSON.preloaded) {
-                    contentFilepath = path.join('data', requestJSON.preloaded, '_original.pdf');
-                } else {
-                    const contentTarget = path.join('uploads', uuidv4() + '.pdf');
-                    const contentStream = fs.createWriteStream(contentTarget);
-                    await new Promise((resolve, reject) => {
-                        contentFile.on('error', reject);
-                        contentStream.on('finish', resolve);
-                        contentFile.pipe(contentStream);
-                    });
-                    contentFilepath = contentTarget;
-                }
+                const contentTarget = path.join('uploads', uuidv4() + '.pdf');
+                const contentStream = fs.createWriteStream(contentTarget);
+                await new Promise((resolve, reject) => {
+                    contentFile.on('error', reject);
+                    contentStream.on('finish', resolve);
+                    contentFile.pipe(contentStream);
+                });
+                contentFilepath = contentTarget;
+                
 
                 switch (task) {
-                    case 'delete':
-                        await fs.remove(path.join('data', requestJSON.preloaded));
-                        break;
+
                     case 'pdf2text':
                         output.response.uri = await PDFToText(contentFilepath, requestJSON.params, dirname);
                         break;
                     case 'pdf2images':
+                        console.log('pdf2images')
                         output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname);
                         break;
                     case 'pdfimages':
                         output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname);
-                        break;
-                    case 'pdfseparate':
-                        output.response.uri = await PDFSeparate(contentFilepath, requestJSON.params, dirname);
-                        break;
-                    case 'pdfsplit':
-                        output.response.uri = await PDFSplit(contentFilepath, requestJSON.params, dirname);
                         break;
                     case 'pdfinfo':
                         output.response.uri = await PDFInfo(contentFilepath, requestJSON.params, dirname);
                         break;
                 }
 
-                if (!requestJSON.preloaded) {
-                    await fs.unlink(contentFilepath);
-                }
+                await fs.unlink(contentFilepath);
+                
             } catch (e) {
-                console.error(e.message);
+                console.error(e);
                 try {
                     if (contentFilepath) await fs.unlink(contentFilepath);
                 } catch (err) {
@@ -204,62 +152,14 @@ init().catch(err => {
 });
 
 
-
-
-async function PDFInfoRaw(filepath, options) {
-    options = { printAsJson: true };
-    const poppler = new Poppler('/usr/bin/');
-    return await poppler.pdfInfo(filepath, options);
-}
-
-async function PDFSeparate(filepath, options, dirname) {
-    if (!options) options = {};
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
-}
-
-async function PDFSplit(filepath, options, dirname) {
-    if(!options) {
-        options = {}
-    }
-    cleanPageOptions(options)
-
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
-    input_dir = `data/${dirname}`
-    var files = await fs.readdir(input_dir)
-    files = files.map(x => path.join(input_dir, x))
-
-    options = {}
-    await poppler.pdfUnite(files, `data/${dirname}/pages.pdf`, options);
-
-    return `/files/${dirname}/pages.pdf`
-}
-
-
-async function PDFSeparate(filepath, options, dirname) {
-    if(!options) {
-        options = {}
-    }
-    cleanPageOptions(options)
-
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfSeparate(filepath, `data/${dirname}/page_%d.pdf`, options);
-    var files = getFileList(`data/${dirname}`,`/files/${dirname}`, ['.pdf'])
-
-    return files
-}
-
 // api-poppler calls this normally so that first and last pages are the same (not zero)
 async function PDFToText(filepath, options, dirname) {
     if(!options) {
         options = {}
     }
+    options.firstPageToConvert = 1
+    options.lastPageToConvert = 1
     cleanPageOptions(options)
-
-    if(options.firstPageToConvert == null || options.lastPageToConvert == null) {
-        throw new Error('firstPageToConvert and lastPageToConvert are required')
-    }
 
     var text_file = `text.txt`
     if(options.firstPageToConvert ===  options.lastPageToConvert){
@@ -267,9 +167,6 @@ async function PDFToText(filepath, options, dirname) {
     } else {
         text_file = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`
     } 
-
-    // get all text from pdf
-
 
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfToText(filepath, `data/${dirname}/${text_file}`, options);
@@ -289,8 +186,9 @@ async function PDFToImages(filepath, options, dirname) {
     }
     options.pngFile = true
     if(!options.cropBox) options.cropBox = true
+    options.firstPageToConvert = 1
+    options.lastPageToConvert = 1
     cleanPageOptions(options)
-    //options.resolutionXYAxis = parseInt(params.resolution)
 
     const poppler = new Poppler('/usr/bin/');
     await poppler.pdfToPpm(filepath, `data/${dirname}/page`, options);
@@ -305,33 +203,17 @@ async function PDFToImages(filepath, options, dirname) {
         options = {}
     }
     options.pngFile = true
-    //options.allFiles = true
+    options.firstPageToConvert = 1
+    options.lastPageToConvert = 1
     cleanPageOptions(options)
 
-    if(options.firstPageToConvert == null || options.lastPageToConvert == null) {
-        throw new Error('firstPageToConvert and lastPageToConvert are required')
-    }
-
     const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfImages(filepath, `data/${dirname}/page-${options.firstPageToConvert}_image`, options)
+    await poppler.pdfImages(filepath, `data/${dirname}/page-1_image`, options)
     var images = await getImageList(`data/${dirname}`,`/files/${dirname}`)
     return images
  }
 
- async function PDFInfo(filepath, options, dirname) {   
-    options = {printAsJson: true}
-    const poppler = new Poppler('/usr/bin/');
-    var r = await poppler.pdfInfo(filepath,  options);
-    await fs.writeFile(`data/${dirname}/info.json`, JSON.stringify(r))
-    return `/files/${dirname}/info.json`
-}
 
-async function PDFInfoRaw(filepath, options) {   
-    options = {printAsJson: true}
-    const poppler = new Poppler('/usr/bin/');
-    var r = await poppler.pdfInfo(filepath,  options);
-    return r
-}
 
 async function getImageList(input_path, fullpath, filter) {
     if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
@@ -354,18 +236,7 @@ async function getFileList(input_path, fullpath, filter) {
 }
 
 function cleanPageOptions(options) {
-    if(options.firstPageToConvert ) {
-        options.firstPageToConvert = parseInt(options.firstPageToConvert, 10) || 0
-    }
-    if(options.lastPageToConvert ) {
-        options.lastPageToConvert = parseInt(options.lastPageToConvert, 10) || 0
-    }
-    if(options.firstPageToExtract ) {
-        options.firstPageToExtract = parseInt(options.firstPageToExtract, 10) || 0
-    }
-    if(options.lastPageToExtract ) {
-        options.lastPageToExtract = parseInt(options.lastPageToExtract, 10) || 0
-    }
+
     if(options.resolutionXAxis ) {
         options.resolutionXAxis = parseInt(options.resolutionXAxis, 10) || 150
     }
