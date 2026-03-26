@@ -1,95 +1,151 @@
 
 # md-poppler
 
-An experimental MessyDesk wrapper for node-poppler: 
+MessyDesk service wrapper around `node-poppler`:
 https://github.com/Fdawgs/node-poppler
 
+## What This Service Does
 
+- Accepts a PDF and a JSON message via multipart upload.
+- Runs one Poppler task (`pdf2text`, `pdf2images`, `pdfimages`, `pdfinfo`).
+- Stores output under `data/<uuid>/...`.
+- Returns downloadable URIs under `/files/{dir}/{file}`.
+
+Important: in MessyDesk, this service receives single-page PDFs (already split upstream). The implementation enforces page 1 for page-based conversion tasks.
 
 ## API
 
-endpoint is http://localhost:8300/process
+Base URL (default): `http://localhost:8300`
 
-Payload is options json and file to be prosecced. 
+### `POST /process`
 
-Endpoint returns JSON with "store" URL, where one can download the result.
+Multipart form-data fields:
 
-	{
-	  "response": {
-	    "type": "stored",
-	    "uri": "/files/020b358c-8815-4bcb-9d08-287aa13532e0/text.txt"
-	  }
+- `message`: JSON file with task definition
+- `content`: input PDF file
+
+`message` payload shape used by current service:
+
+```json
+{
+	"task": {
+		"id": "pdf2text",
+		"params": {
+			"resolutionXYAxis": 150
+		}
 	}
-
-
-A file can be preloaded and splitted while preloaded. This makes it possible to get first files out fast. Other wise large PDF processing would take minutes without any sign of progress.
-
-preload endpoint is http://localhost:8300/upload/:split
-
-	curl -X POST -H "Content-Type: multipart/form-data" \
-	  -F "file=@test/sample.pdf" \
-	  http://localhost:8300/upload/split
-
-
-This will return somethin like this:
-
-{
-  "upload": "data/b1ebe0fa-ea67-461b-9242-970970b5813c/original.pdf"
 }
+```
 
+Supported task ids:
 
-Then, in the process call set "preloaded" to this value like this:
+- `pdf2text`
+- `pdf2images`
+- `pdfimages`
+- `pdfinfo`
 
+Successful response format:
+
+```json
 {
-    "type": "image",
-    "preloaded": "06c13245-a41c-48e9-9a36-4c7e0a21c1db/56e6464468c194939feef91ff61f5fa0",
-    "params": {
-        "task": "pdf2images",
-        "resolutionXYAxis": 150,
-        "firstPageToConvert": 1,
-        "lastPageToConvert": 2
-    }
+	"response": {
+		"type": "stored",
+		"uri": [
+			"/files/020b358c-8815-4bcb-9d08-287aa13532e0/page_001.txt"
+		]
+	}
 }
+```
 
-### Example API call 
+Common error responses:
 
-Run these from MD-poppler directory:
+- `400`: invalid message content (for example missing `task.id`, unsupported task, missing multipart fields)
+- `415`: request is not multipart/form-data
+- `500`: processing failure
 
+### `GET /files/{dir}/{file}`
 
-Text: extract text
+Downloads one generated file. The file is deleted after successful download.
 
-	curl -X POST -H "Content-Type: multipart/form-data" \
-	  -F "request=@test/pdf2text.json;type=application/json" \
-	  -F "content=@test/sample.pdf" \
-	  http://localhost:8300/process
+## Local Run
 
+```bash
+npm install
+node index.js
+```
 
-Separate: extract range on pages and get one pdf PER PAGE
+The server listens on port `8300` by default.
 
-	curl -X POST -H "Content-Type: multipart/form-data" \
-	  -F "request=@test/pdfseparate.json;type=application/json" \
-	  -F "content=@test/sample.pdf" \
-	  http://localhost:8300/process
+## Example Calls
 
+Run from project root (`MD-poppler`):
 
-Split: extract range on pages and get ONE pdf
+### 1. Extract text
 
-	curl -X POST -H "Content-Type: multipart/form-data" \
-	  -F "request=@test/pdfsplit.json;type=application/json" \
-	  -F "content=@test/sample.pdf" \
-	  http://localhost:8300/process
+```bash
+cat > /tmp/md-poppler-message.json <<'JSON'
+{
+	"task": {
+		"id": "pdf2text",
+		"params": {}
+	}
+}
+JSON
 
+curl -X POST http://localhost:8300/process \
+	-F "message=@/tmp/md-poppler-message.json;type=application/json" \
+	-F "content=@test/sample.pdf;type=application/pdf"
+```
 
+### 2. Render page image(s)
 
+```bash
+cat > /tmp/md-poppler-message.json <<'JSON'
+{
+	"task": {
+		"id": "pdf2images",
+		"params": {
+			"resolutionXYAxis": 300
+		}
+	}
+}
+JSON
 
-## MessyDesk
+curl -X POST http://localhost:8300/process \
+	-F "message=@/tmp/md-poppler-message.json;type=application/json" \
+	-F "content=@test/sample.pdf;type=application/pdf"
+```
 
+## Testing
 
+```bash
+npm test
+```
 
-### calling service
+Current suite uses Node's built-in test runner (`node --test`) and covers helper behavior plus request validation paths.
 
+## Docker
 
-	curl -X POST http://localhost:8200/api/queue/md-poppler/files/108:3 -d "@test/services/md-poppler/sample.json" --header "Content-Type: application/json"
+Build image:
+
+```bash
+make build
+```
+
+Run container:
+
+```bash
+make start
+```
+
+Useful targets:
+
+- `make stop`
+- `make restart`
+- `make logs`
+- `make bash`
+- `make test`
+
 
 
 

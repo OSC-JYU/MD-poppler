@@ -1,7 +1,0 @@
-{
-    "type": "image",
-    "params": {
-        "task": "pdf2images",
-        "resolutionXYAxis": 300
-    }
-}

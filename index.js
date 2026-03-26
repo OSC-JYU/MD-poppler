@@ -5,7 +5,18 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { Poppler } = require('node-poppler');
 
-const init = async () => {
+const UPLOADS_DIR = 'uploads';
+const DATA_DIR = 'data';
+const POPPLER_BIN_DIR = '/usr/bin/';
+
+const TASK_HANDLERS = {
+    pdf2text: PDFToText,
+    pdf2images: PDFToImages,
+    pdfimages: ImagesFromPDF,
+    pdfinfo: PDFInfo,
+};
+
+const createServer = async () => {
     const server = Hapi.server({
         port: process.env.PORT || 8300,
         host: '0.0.0.0',
@@ -40,67 +51,46 @@ const init = async () => {
             }
         },
         handler: async (request, h) => {
-            let output = { response: { type: 'stored', uri: [] } };
-            let contentFilepath = '';
+            const output = { response: { type: 'stored', uri: [] } };
+            let requestFilePath = '';
+            let contentFilePath = '';
             try {
                 const data = request.payload;
-                const requestFile = data.request;
-                const contentFile = data.content;
-                
-                const requestFilePath = path.join('uploads', uuidv4() + '.json');
-                const writeStream = fs.createWriteStream(requestFilePath);
-                
-                await new Promise((resolve, reject) => {
-                    requestFile.on('error', reject);
-                    writeStream.on('finish', resolve);
-                    requestFile.pipe(writeStream);
-                });
-                
-                let requestJSON = await fs.readJSON(requestFilePath, 'utf-8');
-                console.log(requestJSON)
-                await fs.unlink(requestFilePath);
-                if (typeof requestJSON === 'string') {
-                    requestJSON = JSON.parse(requestJSON);
+                const requestFile = data?.message;
+                const contentFile = data?.content;
+
+                if (!requestFile || !contentFile) {
+                    return h.response({ error: 'Expected multipart fields: message and content' }).code(400);
                 }
-                const task = requestJSON.params.task;
-                delete requestJSON.params.task;
+
+                requestFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.json`);
+                await saveStreamToFile(requestFile, requestFilePath);
+                const message = await parseMessageFile(requestFilePath);
+
+                if (!message?.task?.id) {
+                    return h.response({ error: 'Invalid message payload: missing task.id' }).code(400);
+                }
+
+                const taskId = message.task.id;
+                const handler = TASK_HANDLERS[taskId];
+                if (!handler) {
+                    return h.response({ error: `Unsupported task: ${taskId}` }).code(400);
+                }
+
                 const dirname = uuidv4();
-                await fs.mkdir(path.join('data', dirname));
-                console.log('dirname', dirname)
+                await fs.ensureDir(path.join(DATA_DIR, dirname));
 
-                const contentTarget = path.join('uploads', uuidv4() + '.pdf');
-                const contentStream = fs.createWriteStream(contentTarget);
-                await new Promise((resolve, reject) => {
-                    contentFile.on('error', reject);
-                    contentStream.on('finish', resolve);
-                    contentFile.pipe(contentStream);
-                });
-                contentFilepath = contentTarget;
-                
+                contentFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.pdf`);
+                await saveStreamToFile(contentFile, contentFilePath);
 
-                switch (task) {
-
-                    case 'pdf2text':
-                        output.response.uri = await PDFToText(contentFilepath, requestJSON.params, dirname);
-                        break;
-                    case 'pdf2images':
-                        console.log('pdf2images')
-                        output.response.uri = await PDFToImages(contentFilepath, requestJSON.params, dirname);
-                        break;
-                    case 'pdfimages':
-                        output.response.uri = await ImagesFromPDF(contentFilepath, requestJSON.params, dirname);
-                        break;
-                    case 'pdfinfo':
-                        output.response.uri = await PDFInfo(contentFilepath, requestJSON.params, dirname);
-                        break;
-                }
-
-                await fs.unlink(contentFilepath);
-                
+                output.response.uri = await handler(contentFilePath, message.task.params, dirname);
+                await safeUnlink(contentFilePath);
+                await safeUnlink(requestFilePath);
             } catch (e) {
-                console.error(e);
+                console.error('Process failed:', e);
                 try {
-                    if (contentFilepath) await fs.unlink(contentFilepath);
+                    await safeUnlink(contentFilePath);
+                    await safeUnlink(requestFilePath);
                 } catch (err) {
                     console.error('Error removing temp files:', err);
                 }
@@ -116,8 +106,11 @@ const init = async () => {
         method: 'GET',
         path: '/files/{dir}/{file}',
         handler: async (request, h) => {
-            const dirPath = path.join('data', request.params.dir);
-            const filePath = path.join(dirPath, request.params.file);
+            const filePath = path.normalize(path.join(DATA_DIR, request.params.dir, request.params.file));
+
+            if (!isPathInside(DATA_DIR, filePath)) {
+                return h.response('Invalid file path').code(400);
+            }
     
             try {
                 await fs.access(filePath);
@@ -142,108 +135,148 @@ const init = async () => {
     });
     
 
-    await server.start();
-    console.log(`Server running on ${server.info.uri}`);
+    return server;
 };
 
-init().catch(err => {
-    console.error(err);
-    process.exit(1);
-});
+const init = async () => {
+    const server = await createServer();
+    await server.start();
+    console.log(`Server running on ${server.info.uri}`);
+    return server;
+};
+
+if (require.main === module) {
+    init().catch((err) => {
+        console.error(err);
+        process.exit(1);
+    });
+}
 
 
 // api-poppler calls this normally so that first and last pages are the same (not zero)
 async function PDFToText(filepath, options, dirname) {
-    if(!options) {
-        options = {}
-    }
-    options.firstPageToConvert = 1
-    options.lastPageToConvert = 1
-    cleanPageOptions(options)
+    options = options || {};
+    options.firstPageToConvert = 1;
+    options.lastPageToConvert = 1;
+    cleanPageOptions(options);
 
-    var text_file = `text.txt`
-    if(options.firstPageToConvert ===  options.lastPageToConvert){
-        text_file = `page_${String(options.firstPageToConvert).padStart(3, '0')}.txt`;
+    let textFile = 'text.txt';
+    if (options.firstPageToConvert === options.lastPageToConvert) {
+        textFile = `page_${String(options.firstPageToConvert).padStart(3, '0')}.txt`;
     } else {
-        text_file = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`
-    } 
+        textFile = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`;
+    }
 
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfToText(filepath, `data/${dirname}/${text_file}`, options);
+    const poppler = new Poppler(POPPLER_BIN_DIR);
+    await poppler.pdfToText(filepath, `${DATA_DIR}/${dirname}/${textFile}`, options);
 
-    if(options.firstPageToConvert === 0 && options.lastPageToConvert === 0) {
-        return `/files/${dirname}/${text_file}`
-    } else if(options.firstPageToConvert ===  options.lastPageToConvert){
-        return [`/files/${dirname}/${text_file}`]
-    }   
-    
+    return [`/files/${dirname}/${textFile}`];
 }
 
 
 async function PDFToImages(filepath, options, dirname) {
-    if(!options) {
-        options = {}
-    }
-    options.pngFile = true
-    if(!options.cropBox) options.cropBox = true
-    options.firstPageToConvert = 1
-    options.lastPageToConvert = 1
-    cleanPageOptions(options)
+    options = options || {};
+    options.pngFile = true;
+    if (!options.cropBox) options.cropBox = true;
+    options.firstPageToConvert = 1;
+    options.lastPageToConvert = 1;
+    cleanPageOptions(options);
 
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfToPpm(filepath, `data/${dirname}/page`, options);
-    var images = getImageList(`data/${dirname}`,`/files/${dirname}`)
-    return images
+    const poppler = new Poppler(POPPLER_BIN_DIR);
+    await poppler.pdfToPpm(filepath, `${DATA_DIR}/${dirname}/page`, options);
+    return getImageList(`${DATA_DIR}/${dirname}`, `/files/${dirname}`);
 
  }
 
 
  async function ImagesFromPDF(filepath, options, dirname) {
-    if(!options) {
-        options = {}
-    }
-    options.pngFile = true
-    options.firstPageToConvert = 1
-    options.lastPageToConvert = 1
-    cleanPageOptions(options)
+    options = options || {};
+    options.pngFile = true;
+    options.firstPageToConvert = 1;
+    options.lastPageToConvert = 1;
+    cleanPageOptions(options);
 
-    const poppler = new Poppler('/usr/bin/');
-    await poppler.pdfImages(filepath, `data/${dirname}/page-1_image`, options)
-    var images = await getImageList(`data/${dirname}`,`/files/${dirname}`)
-    return images
+    const poppler = new Poppler(POPPLER_BIN_DIR);
+    await poppler.pdfImages(filepath, `${DATA_DIR}/${dirname}/page-1_image`, options);
+    return getImageList(`${DATA_DIR}/${dirname}`, `/files/${dirname}`);
  }
+
+async function PDFInfo(filepath, options, dirname) {
+    const poppler = new Poppler(POPPLER_BIN_DIR);
+    const result = await poppler.pdfInfo(filepath, options || {});
+
+    const infoFile = path.join(DATA_DIR, dirname, 'pdfinfo.txt');
+    await fs.writeFile(infoFile, result);
+    return [`/files/${dirname}/pdfinfo.txt`];
+}
 
 
 
 async function getImageList(input_path, fullpath, filter) {
-    if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
-    var files = await fs.readdir(input_path, { withFileTypes: true })
+    if (!filter) filter = ['.png', '.jpg', '.jpeg', '.tiff'];
+    const files = await fs.readdir(input_path, { withFileTypes: true });
     return files
-        .filter(dirent => dirent.isFile())
-        .map(dirent => dirent.name)
-        .filter(f => filter.includes(path.extname(f).toLowerCase()))
-        .map(x => path.join(fullpath, x))
-}
-
-async function getFileList(input_path, fullpath, filter) {
-    if(!filter) filter = ['.png','.jpg', '.jpeg', '.tiff']
-    var files = await fs.readdir(input_path, { withFileTypes: true })
-    return files
-        .filter(dirent => dirent.isFile())
-        .map(dirent => dirent.name)
-        .filter(f => filter.includes(path.extname(f).toLowerCase()))
-        .map(x => path.join(fullpath, x))
+        .filter((dirent) => dirent.isFile())
+        .map((dirent) => dirent.name)
+        .filter((file) => filter.includes(path.extname(file).toLowerCase()))
+        .map((name) => path.posix.join(fullpath, name));
 }
 
 function cleanPageOptions(options) {
 
-    if(options.resolutionXAxis ) {
-        options.resolutionXAxis = parseInt(options.resolutionXAxis, 10) || 150
+    if (options.resolutionXAxis) {
+        options.resolutionXAxis = parseInt(options.resolutionXAxis, 10) || 150;
     }
-    if(options.resolutionYAxis ) {
-        options.resolutionYAxis = parseInt(options.resolutionYAxis, 10)|| 150
+    if (options.resolutionYAxis) {
+        options.resolutionYAxis = parseInt(options.resolutionYAxis, 10) || 150;
     }
-    if(options.resolutionXYAxis ) {
-        options.resolutionXYAxis = parseInt(options.resolutionXYAxis, 10)|| 150
+    if (options.resolutionXYAxis) {
+        options.resolutionXYAxis = parseInt(options.resolutionXYAxis, 10) || 150;
     }
 }
+
+async function saveStreamToFile(inputStream, outputPath) {
+    await fs.ensureDir(path.dirname(outputPath));
+    const outputStream = fs.createWriteStream(outputPath);
+
+    return new Promise((resolve, reject) => {
+        inputStream.on('error', reject);
+        outputStream.on('error', reject);
+        outputStream.on('finish', resolve);
+        inputStream.pipe(outputStream);
+    });
+}
+
+async function parseMessageFile(filePath) {
+    const parsed = await fs.readJSON(filePath, 'utf-8');
+    if (typeof parsed === 'string') {
+        return JSON.parse(parsed);
+    }
+    return parsed;
+}
+
+async function safeUnlink(filePath) {
+    if (!filePath) return;
+    try {
+        await fs.unlink(filePath);
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            throw err;
+        }
+    }
+}
+
+function isPathInside(baseDir, targetPath) {
+    const base = path.resolve(baseDir);
+    const target = path.resolve(targetPath);
+    return target === base || target.startsWith(`${base}${path.sep}`);
+}
+
+module.exports = {
+    createServer,
+    init,
+    cleanPageOptions,
+    safeUnlink,
+    parseMessageFile,
+    isPathInside,
+};
