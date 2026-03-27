@@ -11,6 +11,7 @@
   "dependencies": {
     "@hapi/hapi": "^21.4.0",
     "@hapi/inert": "^7.1.0",
+    "dotenv": "^16.4.5",
     "fs-extra": "^11.1.1",
     "node-poppler": "^6.2.3",
     "uuid": "^9.0.0"

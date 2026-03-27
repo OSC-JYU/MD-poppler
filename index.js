@@ -2,21 +2,213 @@ const Hapi = require('@hapi/hapi');
 const Inert = require('@hapi/inert');
 const fs = require('fs-extra');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { v4: uuidv4 } = require('uuid');
 const { Poppler } = require('node-poppler');
 
 const UPLOADS_DIR = 'uploads';
 const DATA_DIR = 'data';
 const POPPLER_BIN_DIR = '/usr/bin/';
+const STORAGE_MODE = (process.env.STORAGE_MODE || process.env.FILE_STORAGE_MODE || 'disk').toLowerCase();
+const CONTAINER_MODE = ['1', 'true', 'yes', 'on'].includes((process.env.CONTAINER || '').trim().toLowerCase());
+const MD_PATH_ENV = process.env.MD_PATH || '';
 
 const TASK_HANDLERS = {
     pdf2text: PDFToText,
     pdf2images: PDFToImages,
     pdfimages: ImagesFromPDF,
     pdfinfo: PDFInfo,
+    thumbnail: PDFThumbnail,
 };
 
+function resolveMdRoot(mdPathEnv, containerMode) {
+    if (STORAGE_MODE === 'disk' && (typeof mdPathEnv !== 'string' || !mdPathEnv.trim())) {
+        throw new Error('MD_PATH must be set when STORAGE_MODE=disk');
+    }
+
+    const candidates = [];
+
+    if (typeof mdPathEnv === 'string' && mdPathEnv.trim()) {
+        const raw = path.resolve(mdPathEnv.trim());
+        if (path.basename(raw) === 'data') {
+            candidates.push(path.dirname(raw));
+        }
+        candidates.push(raw);
+    }
+
+    if (containerMode) {
+        candidates.push('/app');
+    }
+
+    candidates.push(path.resolve('.'));
+
+    const seen = new Set();
+    const existingDirs = [];
+    for (const candidate of candidates) {
+        if (seen.has(candidate)) {
+            continue;
+        }
+        seen.add(candidate);
+
+        if (fs.existsSync(path.join(candidate, 'data'))) {
+            return candidate;
+        }
+
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+            existingDirs.push(candidate);
+        }
+    }
+
+    if (existingDirs.length > 0) {
+        return existingDirs[0];
+    }
+
+    throw new Error(
+        'Could not resolve MessyDesk data root. Set MD_PATH to MessyDesk root (contains data/).'
+    );
+}
+
+function resolveMdPath(inputPath, mdRoot) {
+    if (typeof inputPath !== 'string' || !inputPath.trim()) {
+        throw new Error('Invalid file.path');
+    }
+
+    const root = path.resolve(mdRoot);
+    const resolved = path.isAbsolute(inputPath)
+        ? path.resolve(inputPath)
+        : path.resolve(root, inputPath);
+
+    if (!isPathInside(root, resolved)) {
+        throw new Error('file.path is outside MD_PATH');
+    }
+
+    return resolved;
+}
+
+function getDbNameFromAnyPath(filePath) {
+    if (typeof filePath !== 'string') {
+        return process.env.DB_NAME || 'messydesk';
+    }
+
+    const normalized = filePath.replace(/\\/g, '/');
+    const parts = normalized.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length - 1; i += 1) {
+        if (parts[i] === 'data' && parts[i + 1]) {
+            return parts[i + 1];
+        }
+    }
+
+    return process.env.DB_NAME || 'messydesk';
+}
+
+function parseMessagePayload(payloadMessage) {
+    if (!payloadMessage) {
+        return null;
+    }
+
+    // Multipart "message" arrives as a stream and must be parsed from file.
+    if (typeof payloadMessage?.pipe === 'function') {
+        return null;
+    }
+
+    if (typeof payloadMessage === 'string') {
+        return JSON.parse(payloadMessage);
+    }
+
+    if (Buffer.isBuffer(payloadMessage)) {
+        return JSON.parse(payloadMessage.toString('utf8'));
+    }
+
+    if (typeof payloadMessage === 'object') {
+        return payloadMessage;
+    }
+
+    return null;
+}
+
+function toPosixPath(inputPath) {
+    return inputPath.split(path.sep).join(path.posix.sep);
+}
+
+function inferOutputType(extension) {
+    const ext = String(extension || '').toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff'].includes(ext)) return 'image';
+    if (ext === 'csv') return 'csv';
+    if (ext === 'json') return 'json';
+    if (ext === 'pdf') return 'pdf';
+    return 'text';
+}
+
+async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath) {
+    if (!Array.isArray(uriEntries)) {
+        return [];
+    }
+
+    const dbName = getDbNameFromAnyPath(sourcePath);
+    const tmpRoot = path.join(mdRoot, 'data', dbName, 'tmp');
+    await fs.ensureDir(tmpRoot);
+
+    const files = [];
+    for (const item of uriEntries) {
+            const uri = typeof item === 'string' ? item : item?.uri;
+            if (typeof uri !== 'string' || !uri) {
+                continue;
+            }
+
+            const absPath = path.isAbsolute(uri) ? uri : path.resolve(mdRoot, uri);
+            if (!await fs.pathExists(absPath)) {
+                continue;
+            }
+
+            const label = item?.label || path.basename(absPath);
+            const extension = (item?.extension || path.extname(label).replace('.', '') || path.extname(absPath).replace('.', '')).toLowerCase();
+            const type = item?.type || inferOutputType(extension);
+
+            let callbackName = path.basename(absPath);
+            let targetPath = path.join(tmpRoot, callbackName);
+
+            if (path.resolve(absPath) !== path.resolve(targetPath)) {
+                if (await fs.pathExists(targetPath)) {
+                    callbackName = `poppler_${uuidv4()}_${path.basename(absPath)}`;
+                    targetPath = path.join(tmpRoot, callbackName);
+                }
+                await fs.copy(absPath, targetPath);
+            }
+
+            files.push({
+                path: callbackName,
+                label,
+                type,
+                extension: extension || 'txt',
+            });
+    }
+
+    return files;
+}
+
+function createOutputTarget(storageMode, sourcePath, mdRoot, taskId) {
+    if (storageMode === 'disk' && taskId === 'thumbnail') {
+        const outputDir = path.dirname(sourcePath);
+        const responseBase = toPosixPath(path.relative(mdRoot, outputDir));
+        return { outputDir, responseBase, responseType: 'direct' };
+    }
+
+    if (storageMode === 'disk') {
+        const dbName = getDbNameFromAnyPath(sourcePath);
+        const jobId = `poppler_${uuidv4()}`;
+        const outputDir = path.join(mdRoot, 'data', dbName, 'tmp', jobId);
+        const responseBase = path.posix.join('data', dbName, 'tmp', jobId);
+        return { outputDir, responseBase, responseType: 'tmp' };
+    }
+
+    const dirname = uuidv4();
+    const outputDir = path.join(DATA_DIR, dirname);
+    const responseBase = path.posix.join('/files', dirname);
+    return { outputDir, responseBase, responseType: 'stored' };
+}
+
 const createServer = async () => {
+    const mdRoot = resolveMdRoot(MD_PATH_ENV, CONTAINER_MODE);
     const server = Hapi.server({
         port: process.env.PORT || 8300,
         host: '0.0.0.0',
@@ -45,7 +237,7 @@ const createServer = async () => {
             payload: {
                 output: 'stream',
                 parse: true,
-                allow: 'multipart/form-data',
+                allow: ['multipart/form-data', 'application/json'],
                 multipart: true,
                 maxBytes: 500 * 1024 * 1024,
             }
@@ -56,16 +248,20 @@ const createServer = async () => {
             let contentFilePath = '';
             try {
                 const data = request.payload;
-                const requestFile = data?.message;
+                const payloadMessage = data?.message || data;
+                const messageFromPayload = parseMessagePayload(payloadMessage);
+                let message = messageFromPayload;
                 const contentFile = data?.content;
 
-                if (!requestFile || !contentFile) {
-                    return h.response({ error: 'Expected multipart fields: message and content' }).code(400);
+                if (!message && payloadMessage?.pipe) {
+                    requestFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.json`);
+                    await saveStreamToFile(payloadMessage, requestFilePath);
+                    message = await parseMessageFile(requestFilePath);
                 }
 
-                requestFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.json`);
-                await saveStreamToFile(requestFile, requestFilePath);
-                const message = await parseMessageFile(requestFilePath);
+                if (!message) {
+                    return h.response({ error: 'Invalid request payload: missing message object' }).code(400);
+                }
 
                 if (!message?.task?.id) {
                     return h.response({ error: 'Invalid message payload: missing task.id' }).code(400);
@@ -77,19 +273,45 @@ const createServer = async () => {
                     return h.response({ error: `Unsupported task: ${taskId}` }).code(400);
                 }
 
-                const dirname = uuidv4();
-                await fs.ensureDir(path.join(DATA_DIR, dirname));
+                if (STORAGE_MODE === 'disk') {
+                    const sourcePath = message?.file?.path;
+                    if (!sourcePath) {
+                        return h.response({ error: 'Disk mode requires message.file.path' }).code(400);
+                    }
 
-                contentFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.pdf`);
-                await saveStreamToFile(contentFile, contentFilePath);
+                    contentFilePath = resolveMdPath(sourcePath, mdRoot);
+                    await fs.access(contentFilePath);
+                } else {
+                    if (!contentFile || !contentFile.pipe) {
+                        return h.response({ error: 'Expected multipart fields: message and content' }).code(400);
+                    }
+                    contentFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.pdf`);
+                    await saveStreamToFile(contentFile, contentFilePath);
+                }
 
-                output.response.uri = await handler(contentFilePath, message.task.params, dirname);
-                await safeUnlink(contentFilePath);
+                const target = createOutputTarget(STORAGE_MODE, contentFilePath, mdRoot, taskId);
+                await fs.ensureDir(target.outputDir);
+
+                const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase);
+                if (STORAGE_MODE === 'disk') {
+                    output.response.type = 'disk';
+                    output.response.files = await normalizeDiskFiles(serviceOutput, mdRoot, contentFilePath);
+                } else {
+                    output.response.type = target.responseType;
+                    output.response.uri = serviceOutput;
+                }
+                output.response.storage_mode = STORAGE_MODE;
+
+                if (STORAGE_MODE !== 'disk') {
+                    await safeUnlink(contentFilePath);
+                }
                 await safeUnlink(requestFilePath);
             } catch (e) {
                 console.error('Process failed:', e);
                 try {
-                    await safeUnlink(contentFilePath);
+                    if (STORAGE_MODE !== 'disk') {
+                        await safeUnlink(contentFilePath);
+                    }
                     await safeUnlink(requestFilePath);
                 } catch (err) {
                     console.error('Error removing temp files:', err);
@@ -154,7 +376,7 @@ if (require.main === module) {
 
 
 // api-poppler calls this normally so that first and last pages are the same (not zero)
-async function PDFToText(filepath, options, dirname) {
+async function PDFToText(filepath, options, outputDir, responseBase) {
     options = options || {};
     options.firstPageToConvert = 1;
     options.lastPageToConvert = 1;
@@ -168,13 +390,13 @@ async function PDFToText(filepath, options, dirname) {
     }
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
-    await poppler.pdfToText(filepath, `${DATA_DIR}/${dirname}/${textFile}`, options);
+    await poppler.pdfToText(filepath, path.join(outputDir, textFile), options);
 
-    return [`/files/${dirname}/${textFile}`];
+    return [path.posix.join(responseBase, textFile)];
 }
 
 
-async function PDFToImages(filepath, options, dirname) {
+async function PDFToImages(filepath, options, outputDir, responseBase) {
     options = options || {};
     options.pngFile = true;
     if (!options.cropBox) options.cropBox = true;
@@ -183,13 +405,13 @@ async function PDFToImages(filepath, options, dirname) {
     cleanPageOptions(options);
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
-    await poppler.pdfToPpm(filepath, `${DATA_DIR}/${dirname}/page`, options);
-    return getImageList(`${DATA_DIR}/${dirname}`, `/files/${dirname}`);
+     await poppler.pdfToPpm(filepath, path.join(outputDir, 'page'), options);
+     return getImageList(outputDir, responseBase);
 
  }
 
 
- async function ImagesFromPDF(filepath, options, dirname) {
+ async function ImagesFromPDF(filepath, options, outputDir, responseBase) {
     options = options || {};
     options.pngFile = true;
     options.firstPageToConvert = 1;
@@ -197,17 +419,79 @@ async function PDFToImages(filepath, options, dirname) {
     cleanPageOptions(options);
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
-    await poppler.pdfImages(filepath, `${DATA_DIR}/${dirname}/page-1_image`, options);
-    return getImageList(`${DATA_DIR}/${dirname}`, `/files/${dirname}`);
+    await poppler.pdfImages(filepath, path.join(outputDir, 'page-1_image'), options);
+    return getImageList(outputDir, responseBase);
  }
 
-async function PDFInfo(filepath, options, dirname) {
+async function PDFInfo(filepath, options, outputDir, responseBase) {
     const poppler = new Poppler(POPPLER_BIN_DIR);
     const result = await poppler.pdfInfo(filepath, options || {});
 
-    const infoFile = path.join(DATA_DIR, dirname, 'pdfinfo.txt');
+    const infoFile = path.join(outputDir, 'pdfinfo.txt');
     await fs.writeFile(infoFile, result);
-    return [`/files/${dirname}/pdfinfo.txt`];
+    return [path.posix.join(responseBase, 'pdfinfo.txt')];
+}
+
+async function renderFirstPageJpeg(filepath, targetPath, resolutionXYAxis) {
+    const poppler = new Poppler(POPPLER_BIN_DIR);
+    const tempBase = path.join(path.dirname(targetPath), `_tmp_${uuidv4()}`);
+    const options = {
+        jpegFile: true,
+        singleFile: true,
+        firstPageToConvert: 1,
+        lastPageToConvert: 1,
+        resolutionXYAxis,
+    };
+
+    cleanPageOptions(options);
+    await poppler.pdfToPpm(filepath, tempBase, options);
+
+    const candidates = [
+        `${tempBase}.jpg`,
+        `${tempBase}.jpeg`,
+        `${tempBase}-1.jpg`,
+        `${tempBase}-1.jpeg`,
+    ];
+
+    let generatedPath = null;
+    for (const candidate of candidates) {
+        // eslint-disable-next-line no-await-in-loop
+        if (await fs.pathExists(candidate)) {
+            generatedPath = candidate;
+            break;
+        }
+    }
+
+    if (!generatedPath) {
+        throw new Error('Thumbnail generation failed: jpeg output not found');
+    }
+
+    await fs.move(generatedPath, targetPath, { overwrite: true });
+}
+
+async function PDFThumbnail(filepath, options, outputDir, responseBase) {
+    options = options || {};
+    const previewResolution = parseInt(options.previewResolution || options.preview_resolution || 150, 10) || 150;
+    const thumbnailResolution = parseInt(options.thumbnailResolution || options.thumbnail_resolution || 80, 10) || 80;
+
+    const previewFile = path.join(outputDir, 'preview.jpg');
+    const thumbnailFile = path.join(outputDir, 'thumbnail.jpg');
+
+    await renderFirstPageJpeg(filepath, previewFile, previewResolution);
+    await renderFirstPageJpeg(filepath, thumbnailFile, thumbnailResolution);
+
+    return [
+        {
+            uri: path.posix.join(responseBase, 'preview.jpg'),
+            label: 'preview',
+            thumb_name: 'preview.jpg',
+        },
+        {
+            uri: path.posix.join(responseBase, 'thumbnail.jpg'),
+            label: 'thumbnail',
+            thumb_name: 'thumbnail.jpg',
+        },
+    ];
 }
 
 
@@ -275,6 +559,10 @@ function isPathInside(baseDir, targetPath) {
 module.exports = {
     createServer,
     init,
+    resolveMdRoot,
+    resolveMdPath,
+    getDbNameFromAnyPath,
+    parseMessagePayload,
     cleanPageOptions,
     safeUnlink,
     parseMessageFile,
