@@ -45,19 +45,20 @@ hint: You can stop service later like this:
 	make stop
 
 
-Now you can if service is running: http://localhost:8300/
+Now you can check if service is running: http://localhost:8300/.
+
 Service is now running but MessyDesk does not know it yet.
 
-Next you must register it to MessyDesk by using MD-consumers. Checkout (if not already) MD-consumers outside of MD-poppler_fs directory.
+Next you must register it to MessyDesk by using MD-consumers. Checkout (if not already done so) MD-consumers outside of MD-poppler_fs directory.
 
 	cd ..
-	https://github.com/OSC-JYU/MD-consumers.git
+	git clone https://github.com/OSC-JYU/MD-consumers.git
 	cd MD-consumers
 	npm install
 
 Then register:
 
-	TOPIC=md-pypdf_fs DEV_URL=localhost:9002 node src/index.mjs 
+	TOPIC=md-poppler_fs DEV_URL=localhost:8300 node src/index.mjs 
 
 Now poppler service should be visible in Crunchers!
 
