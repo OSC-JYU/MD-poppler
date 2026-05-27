@@ -204,7 +204,7 @@ function resolveMdPath(inputPath, mdRoot) {
     const normalizedInput = inputPath.replace(/\\/g, '/');
     const parts = normalizedInput.split('/').filter(Boolean);
     if (parts.includes('..')) {
-        throw new Error('file.path must not contain path traversal segments');
+        throw new Error('file.path is outside MD_PATH');
     }
 
     const root = path.resolve(mdRoot);

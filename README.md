@@ -13,6 +13,59 @@ https://github.com/Fdawgs/node-poppler
 
 Important: in MessyDesk, this service receives single-page PDFs (already split upstream). The implementation enforces page 1 for page-based conversion tasks.
 
+
+## How to run locally?
+
+Service can be run directly as normal node app, or it can be started manually as container , or it can be run as container with nomad.
+
+If you are running MessyDesk locally, the easiest way is to run this is by starting it manually as container.
+
+### Run as container (podman, docker)
+
+Checkout this repo:
+
+	git clone https://github.com/OSC-JYU/MD-poppler.git
+	cd MD-poppler
+
+Service must know where you MessyDesk installation stores its data. So create env file called `.env`:
+
+	MD_PATH="/home/YOUR_USERNAME/MessyDesk"
+	STORAGE_MODE="disk"
+
+Make sure that you have podman or Docker installed. Then build:
+
+	make build
+
+then start:
+
+	make start
+
+hint: You can stop service later like this:
+
+	make stop
+
+
+Now you can if service is running: http://localhost:8300/
+Service is now running but MessyDesk does not know it yet.
+
+Next you must register it to MessyDesk by using MD-consumers. Checkout (if not already) MD-consumers outside of MD-poppler_fs directory.
+
+	cd ..
+	https://github.com/OSC-JYU/MD-consumers.git
+	cd MD-consumers
+	npm install
+
+Then register:
+
+	TOPIC=md-pypdf_fs DEV_URL=localhost:9002 node src/index.mjs 
+
+Now poppler service should be visible in Crunchers!
+
+Press Ctrl + C when you want to remove registration from MessyDesk.
+
+
+
+
 ## API
 
 Base URL (default): `http://localhost:8300`
