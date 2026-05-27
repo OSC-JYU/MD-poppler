@@ -1,10 +1,19 @@
 VERSION := 0.1
-REPOSITORY := messydesk
-IMAGE := md-poppler
+REPOSITORY := localhost
+IMAGE := md-poppler_fs
 CONTAINER := $(IMAGE)
-TAG := $(REPOSITORY)/$(IMAGE):$(VERSION)
+TAG := $(REPOSITORY)/messydesk/$(IMAGE):$(VERSION)
 
 .PHONY: clean build start stop restart bash logs test
+
+ifneq (,$(wildcard .env))
+    include .env
+    export
+endif
+
+ifeq ($(MD_PATH),)
+    $(error MD_PATH is not set. Please set it in .env file or environment)
+endif
 
 clean:
 	-@docker rm -f $(CONTAINER) 2>/dev/null || true
@@ -15,8 +24,10 @@ build:
 
 start:
 	docker run -d --name $(CONTAINER) \
-		-v md-poppler-data:/src/data \
-		-v md-poppler-uploads:/src/uploads \
+		-v $(MD_PATH)/data/:/app/data:Z \
+		--user 0:0 \
+		-e CONTAINER=true \
+		-e MD_PATH=/app \
 		-p 8300:8300 \
 		--restart unless-stopped \
 		$(TAG)

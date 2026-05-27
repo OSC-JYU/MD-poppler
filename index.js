@@ -5,6 +5,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { v4: uuidv4 } = require('uuid');
 const { Poppler } = require('node-poppler');
+const tar = require('tar');
 
 const UPLOADS_DIR = 'uploads';
 const DATA_DIR = 'data';
@@ -12,6 +13,12 @@ const POPPLER_BIN_DIR = '/usr/bin/';
 const STORAGE_MODE = (process.env.STORAGE_MODE || process.env.FILE_STORAGE_MODE || 'disk').toLowerCase();
 const CONTAINER_MODE = ['1', 'true', 'yes', 'on'].includes((process.env.CONTAINER || '').trim().toLowerCase());
 const MD_PATH_ENV = process.env.MD_PATH || '';
+const SERVICE_DESCRIPTOR_PATH = path.resolve(process.env.SERVICE_DESCRIPTOR_PATH || path.join(__dirname, 'service.json'));
+const SERVICE_HELP_PATH = path.resolve(process.env.SERVICE_HELP_PATH || path.join(__dirname, 'help', 'index.md'));
+const SERVICE_HELP_FALLBACK_PATH = path.resolve(process.env.SERVICE_HELP_FALLBACK_PATH || path.join(__dirname, 'index.md'));
+const SERVICE_HELP_FALLBACK_PATH_2 = path.resolve(process.env.SERVICE_HELP_FALLBACK_PATH_2 || path.join(__dirname, 'README.md'));
+const SERVICE_HELP_DIR = path.resolve(process.env.SERVICE_HELP_DIR || path.dirname(SERVICE_HELP_PATH));
+const SERVICE_HELP_RESPONSE_FORMAT = String(process.env.SERVICE_HELP_RESPONSE_FORMAT || '').trim().toLowerCase();
 
 const TASK_HANDLERS = {
     pdf2text: PDFToText,
@@ -20,6 +27,127 @@ const TASK_HANDLERS = {
     pdfinfo: PDFInfo,
     thumbnail: PDFThumbnail,
 };
+
+function getPdfBaseLabel(message, fallbackPath) {
+    const fromMessage = String(
+        message?.file?.label
+        || message?.file?.original_filename
+        || ''
+    ).trim();
+    const fallbackName = path.basename(String(fallbackPath || '')).trim();
+    const raw = fromMessage || fallbackName || 'page';
+    const ext = path.extname(raw);
+    return ext ? raw.slice(0, -ext.length) : raw;
+}
+
+function inferPageNumberFromLabel(label) {
+    const base = path.basename(String(label || ''), path.extname(String(label || '')));
+    const match = base.match(/(\d+)$/);
+    if (!match) {
+        return null;
+    }
+
+    const parsed = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return null;
+    }
+
+    return parsed;
+}
+
+function applyServiceDescriptorOverrides(descriptor) {
+    const overrides = {
+        id: process.env.SERVICE_ID,
+        name: process.env.SERVICE_NAME,
+        adapter: process.env.SERVICE_ADAPTER,
+        local_url: process.env.SERVICE_LOCAL_URL,
+    };
+
+    for (const [key, value] of Object.entries(overrides)) {
+        if (typeof value === 'string' && value.trim()) {
+            descriptor[key] = value.trim();
+        }
+    }
+
+    return descriptor;
+}
+
+async function loadServiceDescriptor() {
+    try {
+        const descriptor = await fs.readJson(SERVICE_DESCRIPTOR_PATH);
+        if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+            throw new Error('Descriptor root must be a JSON object');
+        }
+        return applyServiceDescriptorOverrides(descriptor);
+    } catch (error) {
+        throw new Error(`Could not load service descriptor: ${error.message}`);
+    }
+}
+
+async function loadHelpMarkdown() {
+    const candidates = [SERVICE_HELP_PATH, SERVICE_HELP_FALLBACK_PATH, SERVICE_HELP_FALLBACK_PATH_2];
+    for (const candidate of candidates) {
+        if (await fs.pathExists(candidate)) {
+            return fs.readFile(candidate, 'utf8');
+        }
+    }
+    throw new Error('Help markdown file not found');
+}
+
+function streamToBuffer(stream) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+}
+
+function wantsHelpArchive(request) {
+    const queryFormat = String(request?.query?.format || '').trim().toLowerCase();
+    if (['tar', 'tgz', 'archive', 'bundle'].includes(queryFormat)) {
+        return true;
+    }
+
+    if (SERVICE_HELP_RESPONSE_FORMAT === 'tar' || SERVICE_HELP_RESPONSE_FORMAT === 'tgz' || SERVICE_HELP_RESPONSE_FORMAT === 'archive') {
+        return true;
+    }
+
+    const accept = String(request?.headers?.accept || '').toLowerCase();
+    if (accept.includes('application/x-tar') || accept.includes('application/gzip') || accept.includes('application/x-gzip')) {
+        return true;
+    }
+
+    return false;
+}
+
+async function createHelpArchiveBuffer() {
+    if (!(await fs.pathExists(SERVICE_HELP_DIR))) {
+        throw new Error('Help directory not found');
+    }
+
+    const stream = tar.c({
+        cwd: SERVICE_HELP_DIR,
+        gzip: true,
+        portable: true,
+    }, ['.']);
+
+    return streamToBuffer(stream);
+}
+
+function resolveHelpFilePath(assetPath) {
+    const raw = String(assetPath || '').replace(/^\/+/, '');
+    if (!raw) {
+        throw new Error('Missing help asset path');
+    }
+
+    const helpDir = path.resolve(SERVICE_HELP_DIR);
+    const resolved = path.resolve(path.join(helpDir, raw));
+    if (resolved !== helpDir && !resolved.startsWith(helpDir + path.sep)) {
+        throw new Error('Help asset path is outside allowed directory');
+    }
+    return resolved;
+}
 
 function resolveMdRoot(mdPathEnv, containerMode) {
     if (STORAGE_MODE === 'disk' && (typeof mdPathEnv !== 'string' || !mdPathEnv.trim())) {
@@ -73,13 +201,24 @@ function resolveMdPath(inputPath, mdRoot) {
         throw new Error('Invalid file.path');
     }
 
+    const normalizedInput = inputPath.replace(/\\/g, '/');
+    const parts = normalizedInput.split('/').filter(Boolean);
+    if (parts.includes('..')) {
+        throw new Error('file.path must not contain path traversal segments');
+    }
+
     const root = path.resolve(mdRoot);
+    const dataRoot = path.resolve(root, 'data');
     const resolved = path.isAbsolute(inputPath)
         ? path.resolve(inputPath)
         : path.resolve(root, inputPath);
 
     if (!isPathInside(root, resolved)) {
         throw new Error('file.path is outside MD_PATH');
+    }
+
+    if (!isPathInside(dataRoot, resolved)) {
+        throw new Error('file.path must resolve under MD_PATH/data');
     }
 
     return resolved;
@@ -106,7 +245,7 @@ function parseMessagePayload(payloadMessage) {
         return null;
     }
 
-    // Multipart "message" arrives as a stream and must be parsed from file.
+    // Multipart "message" arrives as a stream and is parsed separately from memory.
     if (typeof payloadMessage?.pipe === 'function') {
         return null;
     }
@@ -124,6 +263,19 @@ function parseMessagePayload(payloadMessage) {
     }
 
     return null;
+}
+
+async function parseMessageStream(payloadMessage) {
+    if (!payloadMessage || typeof payloadMessage.pipe !== 'function') {
+        return null;
+    }
+
+    const buffer = await streamToBuffer(payloadMessage);
+    if (!buffer || buffer.length === 0) {
+        return null;
+    }
+
+    return JSON.parse(buffer.toString('utf8'));
 }
 
 function toPosixPath(inputPath) {
@@ -175,12 +327,18 @@ async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath) {
                 await fs.copy(absPath, targetPath);
             }
 
-            files.push({
+            const normalizedFile = {
                 path: callbackName,
                 label,
                 type,
                 extension: extension || 'txt',
-            });
+            };
+
+            if (Number.isFinite(Number(item?.page_number))) {
+                normalizedFile.page_number = Number(item.page_number);
+            }
+
+            files.push(normalizedFile);
     }
 
     return files;
@@ -229,6 +387,63 @@ const createServer = async () => {
         }
     });
 
+    server.route({
+        method: 'GET',
+        path: '/health',
+        handler: () => ({ status: 'ok', service: 'md-poppler' }),
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/config',
+        handler: async (request, h) => {
+            try {
+                const descriptor = await loadServiceDescriptor();
+                return h.response(descriptor).code(200);
+            } catch (error) {
+                return h.response({ error: error.message }).code(500);
+            }
+        },
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/help',
+        handler: async (request, h) => {
+            try {
+                if (wantsHelpArchive(request)) {
+                    const archiveBuffer = await createHelpArchiveBuffer();
+                    return h
+                        .response(archiveBuffer)
+                        .type('application/gzip')
+                        .header('Content-Disposition', 'inline; filename="help-bundle.tar.gz"')
+                        .code(200);
+                }
+
+                const markdown = await loadHelpMarkdown();
+                return h.response(markdown).type('text/markdown; charset=utf-8').code(200);
+            } catch (error) {
+                return h.response({ error: error.message }).code(404);
+            }
+        },
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/help/files/{assetPath*}',
+        handler: async (request, h) => {
+            try {
+                const target = resolveHelpFilePath(request.params.assetPath);
+                if (!(await fs.pathExists(target))) {
+                    return h.response({ error: 'Help asset not found' }).code(404);
+                }
+                return h.file(target);
+            } catch (error) {
+                return h.response({ error: error.message }).code(400);
+            }
+        },
+    });
+
 
     server.route({
         method: 'POST',
@@ -244,7 +459,6 @@ const createServer = async () => {
         },
         handler: async (request, h) => {
             const output = { response: { type: 'stored', uri: [] } };
-            let requestFilePath = '';
             let contentFilePath = '';
             try {
                 const data = request.payload;
@@ -254,9 +468,7 @@ const createServer = async () => {
                 const contentFile = data?.content;
 
                 if (!message && payloadMessage?.pipe) {
-                    requestFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.json`);
-                    await saveStreamToFile(payloadMessage, requestFilePath);
-                    message = await parseMessageFile(requestFilePath);
+                    message = await parseMessageStream(payloadMessage);
                 }
 
                 if (!message) {
@@ -292,7 +504,7 @@ const createServer = async () => {
                 const target = createOutputTarget(STORAGE_MODE, contentFilePath, mdRoot, taskId);
                 await fs.ensureDir(target.outputDir);
 
-                const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase);
+                const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase, message);
                 if (STORAGE_MODE === 'disk') {
                     output.response.type = 'disk';
                     output.response.files = await normalizeDiskFiles(serviceOutput, mdRoot, contentFilePath);
@@ -305,14 +517,12 @@ const createServer = async () => {
                 if (STORAGE_MODE !== 'disk') {
                     await safeUnlink(contentFilePath);
                 }
-                await safeUnlink(requestFilePath);
             } catch (e) {
                 console.error('Process failed:', e);
                 try {
                     if (STORAGE_MODE !== 'disk') {
                         await safeUnlink(contentFilePath);
                     }
-                    await safeUnlink(requestFilePath);
                 } catch (err) {
                     console.error('Error removing temp files:', err);
                 }
@@ -376,23 +586,30 @@ if (require.main === module) {
 
 
 // api-poppler calls this normally so that first and last pages are the same (not zero)
-async function PDFToText(filepath, options, outputDir, responseBase) {
+async function PDFToText(filepath, options, outputDir, responseBase, message) {
     options = options || {};
     options.firstPageToConvert = 1;
     options.lastPageToConvert = 1;
     cleanPageOptions(options);
 
-    let textFile = 'text.txt';
-    if (options.firstPageToConvert === options.lastPageToConvert) {
-        textFile = `page_${String(options.firstPageToConvert).padStart(3, '0')}.txt`;
-    } else {
-        textFile = `page_${options.firstPageToConvert}-${options.lastPageToConvert}.txt`;
-    }
+    const sourceBaseLabel = getPdfBaseLabel(message, filepath);
+    const textFile = `${sourceBaseLabel}.txt`;
+    const pageNumber = inferPageNumberFromLabel(sourceBaseLabel);
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
     await poppler.pdfToText(filepath, path.join(outputDir, textFile), options);
 
-    return [path.posix.join(responseBase, textFile)];
+    const output = {
+        uri: path.posix.join(responseBase, textFile),
+        label: textFile,
+        extension: 'txt',
+        type: 'text',
+    };
+    if (pageNumber !== null) {
+        output.page_number = pageNumber;
+    }
+
+    return [output];
 }
 
 
@@ -567,4 +784,6 @@ module.exports = {
     safeUnlink,
     parseMessageFile,
     isPathInside,
+    getPdfBaseLabel,
+    inferPageNumberFromLabel,
 };

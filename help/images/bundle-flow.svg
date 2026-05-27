@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="240" viewBox="0 0 920 240" role="img" aria-label="Bundle help flow">
+  <defs>
+    <style>
+      .title { font: 700 22px sans-serif; fill: #0f5d61; }
+      .label { font: 600 15px sans-serif; fill: #1f2937; }
+      .small { font: 400 13px sans-serif; fill: #374151; }
+      .boxA { fill: #dff4f5; stroke: #0f5d61; stroke-width: 2; }
+      .boxB { fill: #f3f7fb; stroke: #1d4e89; stroke-width: 2; }
+      .arrow { stroke: #334155; stroke-width: 2.5; marker-end: url(#arrowhead); fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#334155" />
+    </marker>
+  </defs>
+
+  <text x="24" y="36" class="title">Service Help Bundle Example (MD-poppler_fs)</text>
+
+  <rect x="24" y="62" rx="12" ry="12" width="260" height="128" class="boxA"/>
+  <text x="42" y="95" class="label">Service endpoints</text>
+  <text x="42" y="120" class="small">GET /help</text>
+  <text x="42" y="142" class="small">GET /help/files/tasks.md</text>
+  <text x="42" y="164" class="small">GET /help/files/images/bundle-flow.svg</text>
+
+  <rect x="330" y="62" rx="12" ry="12" width="260" height="128" class="boxB"/>
+  <text x="348" y="95" class="label">MessyDesk ingest</text>
+  <text x="348" y="120" class="small">POST /api/services/{service}/help/ingest</text>
+  <text x="348" y="142" class="small">Fetches linked pages/assets</text>
+  <text x="348" y="164" class="small">Stores under public/help/services/*</text>
+
+  <rect x="636" y="62" rx="12" ry="12" width="260" height="128" class="boxA"/>
+  <text x="654" y="95" class="label">UI rendering</text>
+  <text x="654" y="120" class="small">GET /api/services/{service}/help</text>
+  <text x="654" y="142" class="small">GET /api/services/{service}/help/assets/*</text>
+  <text x="654" y="164" class="small">All served from MessyDesk host</text>
+
+  <path d="M286 126 L322 126" class="arrow"/>
+  <path d="M592 126 L628 126" class="arrow"/>
+</svg>

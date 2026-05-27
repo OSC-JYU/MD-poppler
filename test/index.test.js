@@ -14,6 +14,8 @@ const {
     resolveMdPath,
     getDbNameFromAnyPath,
     isPathInside,
+    getPdfBaseLabel,
+    inferPageNumberFromLabel,
 } = require('../index');
 
 test('cleanPageOptions normalizes numeric resolution values', () => {
@@ -112,4 +114,17 @@ test('getDbNameFromAnyPath extracts db from data path', () => {
 test('resolveMdPath rejects traversal outside root', () => {
     const mdRoot = path.resolve('.');
     assert.throws(() => resolveMdPath('../etc/passwd', mdRoot), /outside MD_PATH/i);
+});
+
+test('getPdfBaseLabel prefers message file label basename', () => {
+    const label = getPdfBaseLabel(
+        { file: { label: 'document_page_007.pdf' } },
+        '/tmp/ignored.pdf'
+    );
+    assert.equal(label, 'document_page_007');
+});
+
+test('inferPageNumberFromLabel parses trailing page number', () => {
+    assert.equal(inferPageNumberFromLabel('document_page_007'), 7);
+    assert.equal(inferPageNumberFromLabel('renamed-file'), null);
 });
