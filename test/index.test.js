@@ -127,4 +127,6 @@ test('getPdfBaseLabel prefers message file label basename', () => {
 test('inferPageNumberFromLabel parses trailing page number', () => {
     assert.equal(inferPageNumberFromLabel('document_page_007'), 7);
     assert.equal(inferPageNumberFromLabel('renamed-file'), null);
+    assert.equal(inferPageNumberFromLabel('page_001.pdf'), 1);
+    assert.equal(inferPageNumberFromLabel('Vuosikertomus 1998'), null);
 });

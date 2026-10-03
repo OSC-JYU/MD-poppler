@@ -40,9 +40,11 @@ function getPdfBaseLabel(message, fallbackPath) {
     return ext ? raw.slice(0, -ext.length) : raw;
 }
 
+// Only labels that look like split pages ("page_001", "report_page_3") carry a page number;
+// any other trailing number ("Vuosikertomus 1998") is part of the name.
 function inferPageNumberFromLabel(label) {
     const base = path.basename(String(label || ''), path.extname(String(label || '')));
-    const match = base.match(/(\d+)$/);
+    const match = base.match(/(?:^|[_\-\s])page[_\-\s]?(\d+)$/i);
     if (!match) {
         return null;
     }
@@ -291,7 +293,7 @@ function inferOutputType(extension) {
     return 'text';
 }
 
-async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath) {
+async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath, moveFiles) {
     if (!Array.isArray(uriEntries)) {
         return [];
     }
@@ -324,7 +326,11 @@ async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath) {
                     callbackName = `poppler_${uuidv4()}_${path.basename(absPath)}`;
                     targetPath = path.join(tmpRoot, callbackName);
                 }
-                await fs.copy(absPath, targetPath);
+                if (moveFiles) {
+                    await fs.move(absPath, targetPath);
+                } else {
+                    await fs.copy(absPath, targetPath);
+                }
             }
 
             const normalizedFile = {
@@ -342,6 +348,12 @@ async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath) {
     }
 
     return files;
+}
+
+async function removeJobFolder(target) {
+    if (target?.responseType === 'tmp') {
+        await fs.remove(target.outputDir);
+    }
 }
 
 function createOutputTarget(storageMode, sourcePath, mdRoot, taskId) {
@@ -390,7 +402,7 @@ const createServer = async () => {
     server.route({
         method: 'GET',
         path: '/health',
-        handler: () => ({ status: 'ok', service: 'md-poppler' }),
+        handler: () => ({ status: 'ok', service: process.env.SERVICE_ID || 'md-poppler_fs' }),
     });
 
     server.route({
@@ -460,6 +472,7 @@ const createServer = async () => {
         handler: async (request, h) => {
             const output = { response: { type: 'stored', uri: [] } };
             let contentFilePath = '';
+            let target = null;
             try {
                 const data = request.payload;
                 const payloadMessage = data?.message || data;
@@ -501,13 +514,15 @@ const createServer = async () => {
                     await saveStreamToFile(contentFile, contentFilePath);
                 }
 
-                const target = createOutputTarget(STORAGE_MODE, contentFilePath, mdRoot, taskId);
+                target = createOutputTarget(STORAGE_MODE, contentFilePath, mdRoot, taskId);
                 await fs.ensureDir(target.outputDir);
 
                 const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase, message);
                 if (STORAGE_MODE === 'disk') {
                     output.response.type = 'disk';
-                    output.response.files = await normalizeDiskFiles(serviceOutput, mdRoot, contentFilePath);
+                    // Job folder outputs are moved to tmp/ and the folder removed; thumbnails are
+                    // written next to the source, so those are copied and left in place.
+                    output.response.files = await normalizeDiskFiles(serviceOutput, mdRoot, contentFilePath, target.responseType === 'tmp');
                 } else {
                     output.response.type = target.responseType;
                     output.response.uri = serviceOutput;
@@ -517,12 +532,14 @@ const createServer = async () => {
                 if (STORAGE_MODE !== 'disk') {
                     await safeUnlink(contentFilePath);
                 }
+                await removeJobFolder(target);
             } catch (e) {
                 console.error('Process failed:', e);
                 try {
                     if (STORAGE_MODE !== 'disk') {
                         await safeUnlink(contentFilePath);
                     }
+                    await removeJobFolder(target);
                 } catch (err) {
                     console.error('Error removing temp files:', err);
                 }
@@ -594,7 +611,10 @@ async function PDFToText(filepath, options, outputDir, responseBase, message) {
 
     const sourceBaseLabel = getPdfBaseLabel(message, filepath);
     const textFile = `${sourceBaseLabel}.txt`;
-    const pageNumber = inferPageNumberFromLabel(sourceBaseLabel);
+    const knownPageNumber = Number(message?.file?.page_number);
+    const pageNumber = Number.isFinite(knownPageNumber) && knownPageNumber > 0
+        ? knownPageNumber
+        : inferPageNumberFromLabel(sourceBaseLabel);
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
     await poppler.pdfToText(filepath, path.join(outputDir, textFile), options);
@@ -613,7 +633,7 @@ async function PDFToText(filepath, options, outputDir, responseBase, message) {
 }
 
 
-async function PDFToImages(filepath, options, outputDir, responseBase) {
+async function PDFToImages(filepath, options, outputDir, responseBase, message) {
     options = options || {};
     options.pngFile = true;
     if (!options.cropBox) options.cropBox = true;
@@ -623,12 +643,13 @@ async function PDFToImages(filepath, options, outputDir, responseBase) {
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
      await poppler.pdfToPpm(filepath, path.join(outputDir, 'page'), options);
-     return getImageList(outputDir, responseBase);
+     // pdftoppm names the output page-1.png; label it after the source file instead
+     return labelImages(await getImageList(outputDir, responseBase), 'page', getPdfBaseLabel(message, filepath));
 
  }
 
 
- async function ImagesFromPDF(filepath, options, outputDir, responseBase) {
+ async function ImagesFromPDF(filepath, options, outputDir, responseBase, message) {
     options = options || {};
     options.pngFile = true;
     options.firstPageToConvert = 1;
@@ -637,7 +658,7 @@ async function PDFToImages(filepath, options, outputDir, responseBase) {
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
     await poppler.pdfImages(filepath, path.join(outputDir, 'page-1_image'), options);
-    return getImageList(outputDir, responseBase);
+    return labelImages(await getImageList(outputDir, responseBase), 'page-1', getPdfBaseLabel(message, filepath));
  }
 
 async function PDFInfo(filepath, options, outputDir, responseBase) {
@@ -721,6 +742,25 @@ async function getImageList(input_path, fullpath, filter) {
         .map((dirent) => dirent.name)
         .filter((file) => filter.includes(path.extname(file).toLowerCase()))
         .map((name) => path.posix.join(fullpath, name));
+}
+
+// Turn uris into output entries whose label starts with the source name instead of the poppler
+// file prefix: page-1.png -> <source>.png, page-1_image-000.png -> <source>_image-000.png.
+function labelImages(uris, prefix, baseLabel) {
+    return uris.map((uri) => {
+        const name = path.posix.basename(uri);
+        const ext = path.extname(name);
+        let rest = name.startsWith(prefix) ? name.slice(prefix.length) : `_${name}`;
+        if (uris.length === 1 && /^-\d+$/.test(path.basename(rest, ext))) {
+            rest = ext;
+        }
+        return {
+            uri,
+            label: `${baseLabel}${rest}`,
+            type: 'image',
+            extension: ext.replace('.', '').toLowerCase(),
+        };
+    });
 }
 
 function cleanPageOptions(options) {
