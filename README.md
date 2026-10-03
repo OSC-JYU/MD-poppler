@@ -71,19 +71,12 @@ Press Ctrl + C when you want to remove registration from MessyDesk.
 
 Base URL (default): `http://localhost:8300`
 
-Storage mode is selected by environment variable:
+The storage mode is picked at start-up:
 
-- `STORAGE_MODE=http`: existing multipart upload/download flow.
-- `STORAGE_MODE=disk` (default): read source PDF directly from `message.file.path` on disk and write outputs directly under MessyDesk `data/<db>/tmp/...`.
+- **Disk mode** when `MD_PATH` points at the MessyDesk root (the directory that contains `data/`): read the source PDF directly from `message.file.path` and write outputs under MessyDesk `data/<db>/tmp/...`. `/config` reports the `elg_fs` adapter.
+- **HTTP mode** when `MD_PATH` is unset or has no `data/`, or with `STORAGE_MODE=http`: the multipart upload/download flow. `/config` reports the `poppler` adapter.
 
-Disk mode path resolution uses:
-
-- `MD_PATH`: MessyDesk root path (directory that contains `data/`).
-- `CONTAINER=true`: optional hint to prefer `/app` as MessyDesk root in containers.
-
-Important:
-- When `STORAGE_MODE=disk` (or `FILE_STORAGE_MODE=disk`), `MD_PATH` must be set.
-- Service loads variables from local `.env` automatically at startup.
+A request that uploads `content` is always handled in HTTP mode. `SERVICE_ADAPTER` overrides the adapter that `/config` reports. The service loads variables from local `.env` automatically at startup.
 
 Example `.env`:
 

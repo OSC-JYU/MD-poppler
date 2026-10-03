@@ -12,6 +12,7 @@ const {
     parseMessageFile,
     parseMessagePayload,
     resolveMdPath,
+    resolveMdRoot,
     getDbNameFromAnyPath,
     isPathInside,
     getPdfBaseLabel,
@@ -114,6 +115,15 @@ test('getDbNameFromAnyPath extracts db from data path', () => {
 test('resolveMdPath rejects traversal outside root', () => {
     const mdRoot = path.resolve('.');
     assert.throws(() => resolveMdPath('../etc/passwd', mdRoot), /outside MD_PATH/i);
+});
+
+test('resolveMdRoot falls back to HTTP mode without a usable MD_PATH', () => {
+    const repoRoot = path.resolve(__dirname, '..');
+    assert.equal(resolveMdRoot('', ''), null);
+    assert.equal(resolveMdRoot(path.join(repoRoot, 'test'), ''), null);
+    assert.equal(resolveMdRoot(repoRoot, 'http'), null);
+    assert.equal(resolveMdRoot(repoRoot, ''), repoRoot);
+    assert.equal(resolveMdRoot(path.join(repoRoot, 'data'), ''), repoRoot);
 });
 
 test('getPdfBaseLabel prefers message file label basename', () => {

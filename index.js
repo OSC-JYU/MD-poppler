@@ -10,8 +10,8 @@ const tar = require('tar');
 const UPLOADS_DIR = 'uploads';
 const DATA_DIR = 'data';
 const POPPLER_BIN_DIR = '/usr/bin/';
-const STORAGE_MODE = (process.env.STORAGE_MODE || process.env.FILE_STORAGE_MODE || 'disk').toLowerCase();
-const CONTAINER_MODE = ['1', 'true', 'yes', 'on'].includes((process.env.CONTAINER || '').trim().toLowerCase());
+// 'http' forces HTTP mode; otherwise disk mode is used when MD_PATH has a data/ directory
+const STORAGE_MODE_ENV = (process.env.STORAGE_MODE || process.env.FILE_STORAGE_MODE || '').trim().toLowerCase();
 const MD_PATH_ENV = process.env.MD_PATH || '';
 const SERVICE_DESCRIPTOR_PATH = path.resolve(process.env.SERVICE_DESCRIPTOR_PATH || path.join(__dirname, 'service.json'));
 const SERVICE_HELP_PATH = path.resolve(process.env.SERVICE_HELP_PATH || path.join(__dirname, 'help', 'index.md'));
@@ -151,51 +151,26 @@ function resolveHelpFilePath(assetPath) {
     return resolved;
 }
 
-function resolveMdRoot(mdPathEnv, containerMode) {
-    if (STORAGE_MODE === 'disk' && (typeof mdPathEnv !== 'string' || !mdPathEnv.trim())) {
-        throw new Error('MD_PATH must be set when STORAGE_MODE=disk');
+// MessyDesk root (the directory that contains data/) for disk mode, or null for HTTP mode:
+// STORAGE_MODE=http, MD_PATH unset, or MD_PATH without data/.
+function resolveMdRoot(mdPathEnv, storageModeEnv = STORAGE_MODE_ENV) {
+    if (storageModeEnv === 'http') {
+        return null;
     }
-
-    const candidates = [];
-
-    if (typeof mdPathEnv === 'string' && mdPathEnv.trim()) {
-        const raw = path.resolve(mdPathEnv.trim());
-        if (path.basename(raw) === 'data') {
-            candidates.push(path.dirname(raw));
-        }
-        candidates.push(raw);
+    const raw = typeof mdPathEnv === 'string' ? mdPathEnv.trim() : '';
+    if (!raw) {
+        return null;
     }
-
-    if (containerMode) {
-        candidates.push('/app');
+    let root = path.resolve(raw);
+    if (path.basename(root) === 'data') {
+        root = path.dirname(root);
     }
-
-    candidates.push(path.resolve('.'));
-
-    const seen = new Set();
-    const existingDirs = [];
-    for (const candidate of candidates) {
-        if (seen.has(candidate)) {
-            continue;
-        }
-        seen.add(candidate);
-
-        if (fs.existsSync(path.join(candidate, 'data'))) {
-            return candidate;
-        }
-
-        if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
-            existingDirs.push(candidate);
-        }
+    const dataDir = path.join(root, 'data');
+    if (fs.existsSync(dataDir) && fs.statSync(dataDir).isDirectory()) {
+        return root;
     }
-
-    if (existingDirs.length > 0) {
-        return existingDirs[0];
-    }
-
-    throw new Error(
-        'Could not resolve MessyDesk data root. Set MD_PATH to MessyDesk root (contains data/).'
-    );
+    console.warn(`MD_PATH=${raw} has no data/ directory, using HTTP mode`);
+    return null;
 }
 
 function resolveMdPath(inputPath, mdRoot) {
@@ -353,6 +328,10 @@ async function normalizeDiskFiles(uriEntries, mdRoot, sourcePath, moveFiles) {
 async function removeJobFolder(target) {
     if (target?.responseType === 'tmp') {
         await fs.remove(target.outputDir);
+    } else if (target?.responseType === 'stored' && await fs.pathExists(target.outputDir)
+        && (await fs.readdir(target.outputDir)).length === 0) {
+        // nothing to download (e.g. pdfimages on a page without images); the dir would stay for good
+        await fs.rmdir(target.outputDir);
     }
 }
 
@@ -378,7 +357,9 @@ function createOutputTarget(storageMode, sourcePath, mdRoot, taskId) {
 }
 
 const createServer = async () => {
-    const mdRoot = resolveMdRoot(MD_PATH_ENV, CONTAINER_MODE);
+    const mdRoot = resolveMdRoot(MD_PATH_ENV);
+    const storageMode = mdRoot ? 'disk' : 'http';
+    console.log(`storage mode: ${mdRoot ? `disk (MD_PATH=${mdRoot})` : 'http'}`);
     const server = Hapi.server({
         port: process.env.PORT || 8300,
         host: '0.0.0.0',
@@ -411,6 +392,11 @@ const createServer = async () => {
         handler: async (request, h) => {
             try {
                 const descriptor = await loadServiceDescriptor();
+                // the consumer adapter that matches the storage mode, unless SERVICE_ADAPTER says otherwise:
+                // elg_fs in disk mode, the dedicated poppler adapter (uploads, thumbnails) in HTTP mode
+                if (!process.env.SERVICE_ADAPTER?.trim()) {
+                    descriptor.adapter = storageMode === 'disk' ? 'elg_fs' : 'poppler';
+                }
                 return h.response(descriptor).code(200);
             } catch (error) {
                 return h.response({ error: error.message }).code(500);
@@ -473,6 +459,7 @@ const createServer = async () => {
             const output = { response: { type: 'stored', uri: [] } };
             let contentFilePath = '';
             let target = null;
+            let requestMode = storageMode;
             try {
                 const data = request.payload;
                 const payloadMessage = data?.message || data;
@@ -498,7 +485,9 @@ const createServer = async () => {
                     return h.response({ error: `Unsupported task: ${taskId}` }).code(400);
                 }
 
-                if (STORAGE_MODE === 'disk') {
+                // a request that uploads the PDF is handled in HTTP mode even when disk mode is available
+                requestMode = contentFile?.pipe ? 'http' : storageMode;
+                if (requestMode === 'disk') {
                     const sourcePath = message?.file?.path;
                     if (!sourcePath) {
                         return h.response({ error: 'Disk mode requires message.file.path' }).code(400);
@@ -508,17 +497,17 @@ const createServer = async () => {
                     await fs.access(contentFilePath);
                 } else {
                     if (!contentFile || !contentFile.pipe) {
-                        return h.response({ error: 'Expected multipart fields: message and content' }).code(400);
+                        return h.response({ error: "Expected multipart fields: message and content (disk mode is off, MD_PATH not found)" }).code(400);
                     }
                     contentFilePath = path.join(UPLOADS_DIR, `${uuidv4()}.pdf`);
                     await saveStreamToFile(contentFile, contentFilePath);
                 }
 
-                target = createOutputTarget(STORAGE_MODE, contentFilePath, mdRoot, taskId);
+                target = createOutputTarget(requestMode, contentFilePath, mdRoot, taskId);
                 await fs.ensureDir(target.outputDir);
 
                 const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase, message);
-                if (STORAGE_MODE === 'disk') {
+                if (requestMode === 'disk') {
                     output.response.type = 'disk';
                     // Job folder outputs are moved to tmp/ and the folder removed; thumbnails are
                     // written next to the source, so those are copied and left in place.
@@ -527,16 +516,16 @@ const createServer = async () => {
                     output.response.type = target.responseType;
                     output.response.uri = serviceOutput;
                 }
-                output.response.storage_mode = STORAGE_MODE;
+                output.response.storage_mode = requestMode;
 
-                if (STORAGE_MODE !== 'disk') {
+                if (requestMode !== 'disk') {
                     await safeUnlink(contentFilePath);
                 }
                 await removeJobFolder(target);
             } catch (e) {
                 console.error('Process failed:', e);
                 try {
-                    if (STORAGE_MODE !== 'disk') {
+                    if (requestMode !== 'disk') {
                         await safeUnlink(contentFilePath);
                     }
                     await removeJobFolder(target);
@@ -571,6 +560,9 @@ const createServer = async () => {
                     try {
                         await fs.unlink(filePath);
                         console.log(`Deleted file: ${filePath}`);
+                        // the job dir goes with its last file
+                        const jobDir = path.dirname(filePath);
+                        if ((await fs.readdir(jobDir)).length === 0) await fs.rmdir(jobDir);
                     } catch (err) {
                         console.error(`Error deleting file: ${err.message}`);
                     }
