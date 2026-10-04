@@ -383,7 +383,7 @@ const createServer = async () => {
     server.route({
         method: 'GET',
         path: '/health',
-        handler: () => ({ status: 'ok', service: process.env.SERVICE_ID || 'md-poppler_fs' }),
+        handler: () => ({ status: 'ok', service: process.env.SERVICE_ID || 'md-poppler' }),
     });
 
     server.route({
@@ -506,7 +506,9 @@ const createServer = async () => {
                 target = createOutputTarget(requestMode, contentFilePath, mdRoot, taskId);
                 await fs.ensureDir(target.outputDir);
 
-                const serviceOutput = await handler(contentFilePath, message.task.params, target.outputDir, target.responseBase, message);
+                // a copy: the handlers set poppler options on it, and only known ones are read
+                const params = { ...(message.task.params || {}) };
+                const serviceOutput = await handler(contentFilePath, params, target.outputDir, target.responseBase, message);
                 if (requestMode === 'disk') {
                     output.response.type = 'disk';
                     // Job folder outputs are moved to tmp/ and the folder removed; thumbnails are
@@ -604,12 +606,10 @@ if (require.main === module) {
 }
 
 
-// api-poppler calls this normally so that first and last pages are the same (not zero)
-async function PDFToText(filepath, options, outputDir, responseBase, message) {
-    options = options || {};
-    options.firstPageToConvert = 1;
-    options.lastPageToConvert = 1;
-    cleanPageOptions(options);
+// Every imported PDF is split into pages (MD-pypdf_fs), so the input is one page: the handlers
+// read page 1 and take no page range. Task params are read by name; the rest are ignored.
+async function PDFToText(filepath, params, outputDir, responseBase, message) {
+    const options = { firstPageToConvert: 1, lastPageToConvert: 1 };
 
     const sourceBaseLabel = getPdfBaseLabel(message, filepath);
     const textFile = `${sourceBaseLabel}.txt`;
@@ -635,13 +635,14 @@ async function PDFToText(filepath, options, outputDir, responseBase, message) {
 }
 
 
-async function PDFToImages(filepath, options, outputDir, responseBase, message) {
-    options = options || {};
-    options.pngFile = true;
-    if (!options.cropBox) options.cropBox = true;
-    options.firstPageToConvert = 1;
-    options.lastPageToConvert = 1;
-    cleanPageOptions(options);
+async function PDFToImages(filepath, params, outputDir, responseBase, message) {
+    const options = {
+        pngFile: true,
+        cropBox: true,
+        firstPageToConvert: 1,
+        lastPageToConvert: 1,
+        resolutionXYAxis: resolutionParam(params),
+    };
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
      await poppler.pdfToPpm(filepath, path.join(outputDir, 'page'), options);
@@ -651,25 +652,34 @@ async function PDFToImages(filepath, options, outputDir, responseBase, message) 
  }
 
 
- async function ImagesFromPDF(filepath, options, outputDir, responseBase, message) {
-    options = options || {};
-    options.pngFile = true;
-    options.firstPageToConvert = 1;
-    options.lastPageToConvert = 1;
-    cleanPageOptions(options);
+ async function ImagesFromPDF(filepath, params, outputDir, responseBase, message) {
+    const options = { pngFile: true, firstPageToConvert: 1, lastPageToConvert: 1 };
 
     const poppler = new Poppler(POPPLER_BIN_DIR);
     await poppler.pdfImages(filepath, path.join(outputDir, 'page-1_image'), options);
     return labelImages(await getImageList(outputDir, responseBase), 'page-1', getPdfBaseLabel(message, filepath));
  }
 
-async function PDFInfo(filepath, options, outputDir, responseBase) {
+async function PDFInfo(filepath, params, outputDir, responseBase, message) {
     const poppler = new Poppler(POPPLER_BIN_DIR);
-    const result = await poppler.pdfInfo(filepath, options || {});
+    const result = await poppler.pdfInfo(filepath, {});
 
-    const infoFile = path.join(outputDir, 'pdfinfo.txt');
-    await fs.writeFile(infoFile, result);
-    return [path.posix.join(responseBase, 'pdfinfo.txt')];
+    // <pdf label without .pdf>.pdfinfo.txt, e.g. page_012.pdfinfo.txt
+    const infoFile = `${getPdfBaseLabel(message, filepath)}.pdfinfo.txt`;
+    await fs.writeFile(path.join(outputDir, infoFile), result);
+    return [{
+        uri: path.posix.join(responseBase, infoFile),
+        label: infoFile,
+        extension: 'txt',
+        type: 'text',
+    }];
+}
+
+// Render resolution in dpi: params.resolution, 72-600, 150 by default.
+function resolutionParam(params) {
+    const value = parseInt(params?.resolution, 10);
+    if (!Number.isFinite(value)) return 150;
+    return Math.min(600, Math.max(72, value));
 }
 
 async function renderFirstPageJpeg(filepath, targetPath, resolutionXYAxis) {
@@ -817,6 +827,7 @@ function isPathInside(baseDir, targetPath) {
 
 module.exports = {
     createServer,
+    resolutionParam,
     init,
     resolveMdRoot,
     resolveMdPath,

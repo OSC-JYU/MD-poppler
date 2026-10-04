@@ -49,7 +49,7 @@ Now you can check if service is running: http://localhost:8300/.
 
 Service is now running but MessyDesk does not know it yet.
 
-Next you must register it to MessyDesk by using MD-consumers. Checkout (if not already done so) MD-consumers outside of MD-poppler_fs directory.
+Next you must register it to MessyDesk by using MD-consumers. Checkout (if not already done so) MD-consumers outside of the MD-poppler directory.
 
 	cd ..
 	git clone https://github.com/OSC-JYU/MD-consumers.git
@@ -58,7 +58,7 @@ Next you must register it to MessyDesk by using MD-consumers. Checkout (if not a
 
 Then register:
 
-	TOPIC=md-poppler_fs DEV_URL=localhost:8300 node src/index.mjs 
+	TOPIC=md-poppler DEV_URL=localhost:8300 node src/index.mjs 
 
 Now poppler service should be visible in Crunchers!
 
@@ -102,13 +102,17 @@ Multipart form-data fields:
 ```json
 {
 	"task": {
-		"id": "pdf2text",
+		"id": "pdf2images",
 		"params": {
-			"resolutionXYAxis": 150
+			"resolution": 150
 		}
 	}
 }
 ```
+
+Every imported PDF is split into pages (MD-pypdf_fs), so each task reads page 1 of its input;
+there are no page-range params. Params are read by name (`resolution` for `pdf2images`, the
+thumbnail resolutions for `thumbnail`); anything else is ignored.
 
 Supported task ids:
 
@@ -211,7 +215,7 @@ cat > /tmp/md-poppler-message.json <<'JSON'
 	"task": {
 		"id": "pdf2images",
 		"params": {
-			"resolutionXYAxis": 300
+			"resolution": 300
 		}
 	}
 }

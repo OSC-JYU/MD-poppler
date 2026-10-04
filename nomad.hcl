@@ -32,7 +32,7 @@ job "md-poppler" {
     task "md-poppler" {
       driver = "docker"
       config {
-          image = "osc.repo.kopla.jyu.fi/messydesk/md-poppler_fs:0.1"
+          image = "osc.repo.kopla.jyu.fi/messydesk/md-poppler:0.1"
           ports = ["node"]
           volumes = ["${var.md_path}/data:/app/data:Z"]
           auth {
