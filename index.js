@@ -583,6 +583,16 @@ const init = async () => {
     const server = await createServer();
     await server.start();
     console.log(`Server running on ${server.info.uri}`);
+
+    // Node as PID 1 in a container has no default signal handling: without this, stopping the
+    // container waits for its timeout (10 s) and then kills the service mid-request.
+    const shutdown = async (signal) => {
+        console.log(`${signal}: shutting down`);
+        await server.stop({ timeout: 5000 });
+        process.exit(0);
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
     return server;
 };
 
